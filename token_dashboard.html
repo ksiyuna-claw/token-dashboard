@@ -213,7 +213,7 @@ function renderQuotaCard(name, subtitle, limits, level) {
       rows += `<div class="quota-row">
         <div><div class="label">${label}</div><div class="sub">${l.percentage}% 已用</div>
           <div class="progress-bar"><div class="fill" style="width:${l.percentage}%;background:${c}"></div></div>
-          <div class="countdown">🔄 ${l.percentage}%已用${timeProgress(l.nextResetTime, l.unit)}，${countdown(l.nextResetTime)} 恢复</div>
+          <div class="countdown">${l.percentage===0&&!l.nextResetTime?'✅ 已恢复':`🔄 ${l.percentage}%已用${timeProgress(l.nextResetTime, l.unit)}，${countdown(l.nextResetTime)} 恢复`}</div>
         </div>
         <div style="text-align:right">${tag}</div>
       </div>`;

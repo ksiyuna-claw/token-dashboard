@@ -49,6 +49,8 @@ def time_progress(ts, unit):
 def quota_status(used_pct, next_reset_ms, unit):
     if used_pct >= 100:
         return "\U0001f534已停"
+    if used_pct <= 0:
+        return "\U0001f535观察中"
     period = PERIOD_MS.get(unit)
     if not period or not next_reset_ms:
         if used_pct >= 90: return "\U0001f534危险"
@@ -106,7 +108,8 @@ def main():
                 tp = time_progress(nrt, lim['unit'])
                 tp_str = f"，时间进度 {tp}" if tp else ""
                 tag = '海外' if 'Z.AI' in name else '国内'
-                lines.append(f"  {status} [{tag}] {label}: {lim['percentage']}%已用{tp_str}，{countdown(nrt)}恢复")
+                recovery = "已恢复" if lim['percentage'] == 0 and not nrt else countdown(nrt) + "恢复"
+                lines.append(f"  {status} [{tag}] {label}: {lim['percentage']}%已用{tp_str}，{recovery}")
             lines.append("")
         except Exception as e:
             lines.append(f"{name}: \u274c {e}")
