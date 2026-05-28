@@ -181,7 +181,7 @@ function getQuotaStatus(usedPct, nextReset, unit) {
   if (elapsed <= 0 || elapsed < 10 * 60 * 1000) return 'bright_safe';
   const timePct = Math.min(elapsed / period * 100, 100);
   const ratio = usedPct / Math.max(timePct, 0.1);
-  if (ratio < 0.5) return 'bright_safe';
+  if (ratio < 0.5) return 'safe';
   if (ratio < 1.0) return 'safe';
   if (ratio < 1.5) return 'warn';
   return 'danger';
