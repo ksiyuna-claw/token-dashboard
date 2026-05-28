@@ -20,6 +20,7 @@
   .quota-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(48,54,61,0.5); }
   .quota-row:last-child { border-bottom: none; }
   .quota-row .label { font-size: 13px; color: var(--dim); }
+  .quota-row .main-col { flex: 1; min-width: 0; }
   .quota-row .value { font-size: 18px; font-weight: 700; }
   .quota-row .sub { font-size: 11px; color: var(--dim); margin-top: 2px; }
   .progress-bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 6px; overflow: hidden; }
@@ -211,7 +212,7 @@ function renderQuotaCard(name, subtitle, limits, level) {
       const tag = quotaTag(l.percentage, l.nextResetTime, l.unit);
       const label = l.unit === 3 ? '5小时窗口' : l.unit === 6 ? '周额度' : 'Token';
       rows += `<div class="quota-row">
-        <div><div class="label">${label}</div><div class="sub">${l.percentage}% 已用</div>
+        <div class="main-col"><div class="label">${label}</div><div class="sub">${l.percentage}% 已用</div>
           <div class="progress-bar"><div class="fill" style="width:${l.percentage}%;background:${c}"></div></div>
           <div class="countdown">${l.percentage===0&&!l.nextResetTime?'✅ 已恢复':`🔄 ${l.percentage}%已用${timeProgress(l.nextResetTime, l.unit)}，${countdown(l.nextResetTime)} 恢复`}</div>
         </div>
