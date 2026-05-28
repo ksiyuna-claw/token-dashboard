@@ -1,0 +1,12 @@
+{
+  "zhipu": {
+    "overseas_key": "YOUR_ZHIPU_OVERSEAS_API_KEY",
+    "domestic_key": "YOUR_ZHIPU_DOMESTIC_API_KEY"
+  },
+  "deepseek_key": "YOUR_DEEPSEEK_API_KEY",
+  "telegram": {
+    "bot_token": "YOUR_BOT_TOKEN",
+    "chat_id": "YOUR_CHAT_ID"
+  },
+  "work_dir": "/home/YOUR_USER/ai_workspace/scripts"
+}
