@@ -1,5 +1,7 @@
 # 🦐 Token Dashboard
 
+> **匡书记的虾厂出品** | [GitHub](https://github.com/ksiyuna-claw)
+
 OpenClaw 多 Agent 的 API 用量监控看板 + Telegram 定时推送。
 
 ## 功能
@@ -23,11 +25,14 @@ token_usage_push.py        ← TG 推送脚本（由 systemd timer 触发）
 
 ## 快速开始
 
-### 1. 准备配置文件
+### 1. 设置环境变量
 
 ```bash
-cp config.example.json config.json
-# 编辑 config.json，填入你的 API key
+export ZHIPU_ZAI_KEY="your-zhipu-overseas-api-key"
+export ZHIPU_DOMESTIC_KEY="your-zhipu-domestic-api-key"
+export DEEPSEEK_KEY="your-deepseek-api-key"
+export TG_BOT_TOKEN="your-telegram-bot-token"
+export TG_CHAT_ID="your-telegram-chat-id"
 ```
 
 ### 2. 启动看板
@@ -94,24 +99,15 @@ systemctl --user enable --now token-dashboard.service
 systemctl --user enable --now token-push.timer
 ```
 
-## 配置说明
+## 环境变量
 
-`config.json` 结构：
-
-```json
-{
-  "zhipu": {
-    "overseas_key": "智谱海外(Coding Plan) API Key",
-    "domestic_key": "智谱国内 API Key"
-  },
-  "deepseek_key": "DeepSeek API Key",
-  "telegram": {
-    "bot_token": "Telegram Bot Token",
-    "chat_id": "接收推送的 Chat ID"
-  },
-  "work_dir": "openclaw scripts 目录，存放 snapshot 和 HTML"
-}
-```
+| 变量 | 说明 |
+|------|------|
+| `ZHIPU_ZAI_KEY` | 智谱海外 Coding Plan API Key (api.z.ai) |
+| `ZHIPU_DOMESTIC_KEY` | 智谱国内 API Key (open.bigmodel.cn) |
+| `DEEPSEEK_KEY` | DeepSeek API Key |
+| `TG_BOT_TOKEN` | Telegram Bot Token |
+| `TG_CHAT_ID` | 接收推送的 Telegram Chat ID |
 
 ## 告警逻辑
 

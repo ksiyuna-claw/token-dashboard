@@ -42,8 +42,9 @@
   .loading { color: var(--dim); text-align: center; padding: 20px; font-size: 13px; }
   .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
   .summary-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; text-align: center; }
-  .summary-card .val { font-size: 24px; font-weight: 700; }
+  .summary-card .val { font-size: 20px; font-weight: 700; }
   .summary-card .lbl { font-size: 11px; color: var(--dim); margin-top: 4px; }
+  .health-card .val { font-size: 18px !important; }
   .provider-tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; margin-left: 4px; }
   .provider-tag-zai { background: rgba(88,166,255,0.15); color: var(--blue); }
   .provider-tag-zhipu { background: rgba(63,185,80,0.15); color: var(--green); }
@@ -58,12 +59,23 @@
   .tab-badge { display: inline-block; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; font-size: 10px; background: var(--border); color: var(--dim); margin-left: 4px; padding: 0 4px; }
   .tab-btn.active .tab-badge { background: rgba(88,166,255,0.25); color: var(--blue); }
   .kind-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-right: 4px; }
-  .kind-badge-cron { background: rgba(210,153,34,0.15); color: var(--yellow); }
   .kind-badge-subagent { background: rgba(188,140,255,0.15); color: var(--purple); }
   .kind-badge-slash { background: rgba(139,148,158,0.15); color: var(--dim); }
   .kind-badge-weixin { background: rgba(63,185,80,0.15); color: var(--green); }
   .kind-badge-system { background: rgba(88,166,255,0.1); color: var(--blue); }
   .empty-msg { color: var(--dim); text-align: center; padding: 24px; font-size: 13px; }
+  /* Cron module */
+  .cron-subtitle { font-size: 12px; color: var(--dim); margin-bottom: 8px; }
+  .cron-table { margin-bottom: 16px; }
+  .cron-table:last-child { margin-bottom: 0; }
+  .cron-table th { font-size: 11px; }
+  .cron-table td { font-size: 12px; }
+  .cron-status-ok { color: var(--green); }
+  .cron-status-error { color: var(--red); font-weight: 700; }
+  .cron-status-unknown { color: var(--dim); }
+  .cron-row-error { background: rgba(248,81,73,0.08); }
+  .cron-row-disabled { opacity: 0.4; }
+  .cron-row-comment { opacity: 0.4; font-style: italic; }
 </style>
 </head>
 <body>
@@ -84,7 +96,6 @@
   <div class="section-title">🤖 员工状态</div>
   <div class="tab-bar" id="sessionTabs">
     <button class="tab-btn active" data-filter="direct" onclick="switchTab(this)">主会话<span class="tab-badge" id="badge-direct">0</span></button>
-    <button class="tab-btn" data-filter="cron" onclick="switchTab(this)">定时任务<span class="tab-badge" id="badge-cron">0</span></button>
     <button class="tab-btn" data-filter="subagent" onclick="switchTab(this)">子代理<span class="tab-badge" id="badge-subagent">0</span></button>
     <button class="tab-btn" data-filter="slash" onclick="switchTab(this)">Slash<span class="tab-badge" id="badge-slash">0</span></button>
     <button class="tab-btn" data-filter="weixin" onclick="switchTab(this)">微信Bot<span class="tab-badge" id="badge-weixin">0</span></button>
@@ -100,6 +111,27 @@
       <tbody id="agentTable"><tr><td colspan="5" class="loading">正在获取...</td></tr></tbody>
     </table>
   </div>
+</div>
+
+<div class="section" id="healthSection">
+  <div class="section-title">🩺 系统健康</div>
+  <div class="summary-grid" id="healthGrid">
+    <div class="summary-card"><div class="val" id="hCpu">...</div><div class="lbl">CPU 使用率</div></div>
+    <div class="summary-card"><div class="val" id="hMem">...</div><div class="lbl">内存</div></div>
+    <div class="summary-card"><div class="val" id="hSwap">...</div><div class="lbl">Swap</div></div>
+    <div class="summary-card"><div class="val" id="hDisk">...</div><div class="lbl">磁盘 /</div></div>
+    <div class="summary-card"><div class="val" id="hLoad">...</div><div class="lbl">负载 1m/5m/15m</div></div>
+    <div class="summary-card"><div class="val" id="hCdp">...</div><div class="lbl">CDP Chrome</div></div>
+  </div>
+  <div id="cdpWarn" style="display:none;margin-top:10px;padding:8px 12px;background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.3);border-radius:6px;font-size:12px;color:var(--red)"></div>
+</div>
+
+<div class="section" id="cronSection">
+  <div class="section-title">⏱ 定时任务</div>
+  <div class="cron-subtitle" id="cronSubtitle">正在获取...</div>
+  <div class="cron-table"><table><thead><tr><th>任务名</th><th>用途</th><th>周期</th><th>上次执行</th><th>状态</th><th>下次执行</th></tr></thead><tbody id="cronOpenclawBody"><tr><td colspan="6" class="loading">正在获取...</td></tr></tbody></table></div>
+  <div class="cron-table"><table><thead><tr><th>用途</th><th>调度</th><th>命令</th></tr></thead><tbody id="cronCrontabBody"><tr><td colspan="3" class="loading">正在获取...</td></tr></tbody></table></div>
+  <div class="cron-table"><table><thead><tr><th>服务名</th><th>用途</th><th>运行方式</th><th>开机启动</th><th>状态</th></tr></thead><tbody id="cronLaunchBody"><tr><td colspan="5" class="loading">正在获取...</td></tr></tbody></table></div>
 </div>
 
 <div class="section">
@@ -149,12 +181,11 @@ function timeProgress(ts, unit) {
 // ===== Session 分类 =====
 // 按 key 模式分类，优先级从高到低
 const CATEGORY_RULES = [
-  { id: 'cron',     test: k => k.includes(':cron:'),                            label: 'cron',     badgeCls: 'kind-badge-cron' },
   { id: 'subagent', test: k => k.includes(':subagent:'),                         label: '子代理',   badgeCls: 'kind-badge-subagent' },
   { id: 'slash',    test: k => k.includes(':slash:'),                            label: 'slash',    badgeCls: 'kind-badge-slash' },
   { id: 'weixin',   test: k => k.includes('openclaw-weixin'),                    label: '微信',     badgeCls: 'kind-badge-weixin' },
   { id: 'direct',   test: k => k.includes('telegram:direct') || k.includes(':direct:'), label: '主会话', badgeCls: '' },
-  { id: 'system',   test: k => k.endsWith(':main') || (k.includes(':main') && !k.includes(':cron:') && !k.includes(':subagent:')), label: '系统', badgeCls: 'kind-badge-system' },
+  { id: 'system',   test: k => k.endsWith(':main') || (k.includes(':main') && !k.includes(':subagent:')), label: '系统', badgeCls: 'kind-badge-system' },
 ];
 
 function classifySession(s) {
@@ -380,7 +411,6 @@ function renderSessions() {
     {lbl:'员工总数', val:agents.size},
     {lbl:'总 Session', val:_allSessions.length},
     {lbl:'主会话', val:(_categoryCounts.direct||0)},
-    {lbl:'定时任务', val:(_categoryCounts.cron||0)},
     {lbl:'子代理', val:(_categoryCounts.subagent||0)},
     {lbl:'总输入 Token', val:fmt(totalIn)},
     {lbl:'总输出 Token', val:fmt(totalOut)},
@@ -389,12 +419,162 @@ function renderSessions() {
 
 async function refresh() {
   document.getElementById('lastUpdate').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
-  await Promise.all([fetchProviderQuotas(), fetchSessions()]);
+  await Promise.all([fetchProviderQuotas(), fetchSessions(), fetchCron(), fetchHealth()]);
+}
+
+// ===== 系统健康模块 =====
+async function fetchHealth() {
+  try {
+    const r = await fetch('/health-json');
+    const d = await r.json();
+    
+    // CPU
+    const cpu = d.cpu_pct || 0;
+    const cpuEl = document.getElementById('hCpu');
+    cpuEl.textContent = cpu.toFixed(1) + '%';
+    cpuEl.style.color = cpu > 80 ? 'var(--red)' : cpu > 50 ? 'var(--yellow)' : 'var(--green)';
+    
+    // 内存
+    const memEl = document.getElementById('hMem');
+    memEl.innerHTML = d.mem_used_gb + '<small style="font-size:12px;color:var(--dim)">/' + d.mem_total_gb + 'GB</small>';
+    memEl.style.color = d.mem_pct > 90 ? 'var(--red)' : d.mem_pct > 75 ? 'var(--yellow)' : 'var(--green)';
+    
+    // Swap
+    const swapEl = document.getElementById('hSwap');
+    if (d.swap_used_m !== undefined) {
+      swapEl.innerHTML = d.swap_used_m.toFixed(0) + '<small style="font-size:11px;color:var(--dim)">MB</small>';
+      swapEl.style.color = d.swap_used_m > 8000 ? 'var(--red)' : d.swap_used_m > 4000 ? 'var(--yellow)' : 'var(--green)';
+    } else {
+      swapEl.textContent = '—';
+      swapEl.style.color = 'var(--dim)';
+    }
+    
+    // 磁盘
+    const diskEl = document.getElementById('hDisk');
+    diskEl.textContent = (d.disk_pct || '?') + '%';
+    diskEl.style.color = d.disk_pct > 90 ? 'var(--red)' : d.disk_pct > 80 ? 'var(--yellow)' : 'var(--green)';
+    
+    // 负载
+    const loadEl = document.getElementById('hLoad');
+    loadEl.innerHTML = d.load_1m + ' / ' + d.load_5m + ' / ' + d.load_15m;
+    const ncpu = d.cpu_cores || 4;
+    loadEl.style.color = d.load_1m > ncpu * 2 ? 'var(--red)' : d.load_1m > ncpu ? 'var(--yellow)' : 'var(--green)';
+    
+    // CDP Chrome
+    const cdpEl = document.getElementById('hCdp');
+    const warnEl = document.getElementById('cdpWarn');
+    if (d.cdp_renderers && d.cdp_renderers.length > 0) {
+      const maxCpu = Math.max(...d.cdp_renderers.map(x => x.cpu));
+      cdpEl.textContent = '\u26a0\ufe0f ' + maxCpu.toFixed(0) + '%';
+      cdpEl.style.color = maxCpu > 50 ? 'var(--red)' : 'var(--yellow)';
+      
+      let pages = d.cdp_pages ? d.cdp_pages.join(' \u00b7 ') : '';
+      warnEl.style.display = 'block';
+      warnEl.innerHTML = '\ud83d\udd34 CDP Chrome \u5b58\u5728\u9ad8CPU\u9875\u9762: ' + 
+        d.cdp_renderers.map(r => 'PID ' + r.pid + ' (' + r.cpu.toFixed(0) + '%)').join(', ') +
+        (pages ? '<br>\ud83d\udda5 \u6253\u5f00\u9875\u9762: ' + pages : '');
+    } else {
+      cdpEl.textContent = '\u2705 \u6b63\u5e38';
+      cdpEl.style.color = 'var(--green)';
+      warnEl.style.display = 'none';
+    }
+  } catch(e) {
+    console.error('fetchHealth:', e);
+  }
+}
+
+// ===== Cron 模块 =====
+const AGENT_CRON_NAMES = {main:'罗氏虾',jiweixia:'基围虾',duijiaoxia:'对焦虾'};
+
+function tsToTime(ms) {
+  if (!ms) return '-';
+  const d = new Date(ms);
+  return d.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+
+function humanPeriod(expr, tz) {
+  if (!expr) return '?';
+  const parts = expr.split(' ');
+  if (parts.length < 5) return expr;
+  const m = parts[0], h = parts[1], d = parts[2], mo = parts[3], dw = parts[4];
+  const days = ['日','一','二','三','四','五','六'];
+  if (d !== '*' && mo !== '*') return `每月${mo}日 ${h}:${m.padStart(2,'0')}`;
+  if (dw !== '*') return `周${days[parseInt(dw)]} ${h}:${m.padStart(2,'0')}`;
+  if (h.includes(',')) return h + ':' + m.padStart(2,'0');
+  if (h === '*') {
+    if (m.includes('*/')) return `每${m.split('/')[1]}分钟`;
+    return `每时${m}分`;
+  }
+  return `每天 ${h}:${m.padStart(2,'0')}`;
+}
+
+async function fetchCron() {
+  try {
+    const r = await fetch('/cron-json');
+    const d = await r.json();
+    document.getElementById('cronSubtitle').textContent = `${d.openclawCron.length} 个定时任务 · ${d.crontab.filter(c=>c.enabled).length} 条 crontab · ${d.launchAgents.length} 个系统服务`;
+
+    // OpenClaw Cron table
+    let html = '';
+    for (const j of d.openclawCron) {
+      const cls = j.consecutiveErrors >= 2 ? 'cron-row-error' : !j.enabled ? 'cron-row-disabled' : '';
+      let statusHtml;
+      if (j.lastRunStatus === 'ok') statusHtml = '<span class="cron-status-ok">✅</span>';
+      else if (j.lastRunStatus === 'error') statusHtml = '<span class="cron-status-error">❌ ' + (j.consecutiveErrors||0) + '次</span>';
+      else statusHtml = '<span class="cron-status-unknown">❓</span>';
+      html += `<tr class="${cls}">
+        <td><strong>${j.name}</strong>${j.agentId ? '<br><small style="color:var(--dim)">'+AGENT_CRON_NAMES[j.agentId]+'</small>' : ''}</td>
+        <td style="font-size:11px;color:var(--dim);max-width:180px">${j.purpose||'—'}</td>
+        <td>${j.scheduleHuman||humanPeriod(j.schedule,j.tz)}</td>
+        <td>${tsToTime(j.lastRunAtMs)}</td>
+        <td>${statusHtml}</td>
+        <td>${tsToTime(j.nextRunAtMs)}</td>
+      </tr>`;
+    }
+    document.getElementById('cronOpenclawBody').innerHTML = html || '<tr><td colspan="6" class="empty-msg">无定时任务</td></tr>';
+
+    // Crontab table (enabled only)
+    const crons = d.crontab.filter(c => c.enabled);
+    html = '';
+    for (const c of crons) {
+      html += `<tr>
+        <td style="font-size:11px;color:var(--dim);max-width:200px">${c.purpose||'—'}</td>
+        <td><code>${c.schedule}</code></td>
+        <td style="font-size:11px;color:var(--dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.command}</td>
+      </tr>`;
+    }
+    // Also show disabled/comments
+    const comments = d.crontab.filter(c => !c.enabled);
+    for (const c of comments) {
+      html += `<tr class="cron-row-comment"><td colspan="3">💬 ${c.purpose||c.raw||''}</td></tr>`;
+    }
+    document.getElementById('cronCrontabBody').innerHTML = html || '<tr><td colspan="3" class="empty-msg">无 crontab</td></tr>';
+
+    // LaunchAgent table
+    html = '';
+    for (const a of d.launchAgents) {
+      let statusHtml;
+      if (a.status === 'running') statusHtml = '<span style="color:var(--green)">● 运行中</span>';
+      else if (a.status === 'loaded') statusHtml = '<span style="color:var(--yellow)">◐ 已加载</span>';
+      else statusHtml = '<span style="color:var(--red)">○ 已停止</span>';
+      html += `<tr>
+        <td><strong>${a.name}</strong></td>
+        <td style="font-size:11px;color:var(--dim);max-width:200px">${a.purpose||'—'}</td>
+        <td style="font-size:12px">${a.runMode||'—'}</td>
+        <td>${a.runAtLoad ? '✅' : '—'}</td>
+        <td>${statusHtml}</td>
+      </tr>`;
+    }
+    document.getElementById('cronLaunchBody').innerHTML = html || '<tr><td colspan="4" class="empty-msg">无系统服务</td></tr>';
+  } catch(e) {
+    document.getElementById('cronSubtitle').textContent = '获取失败: ' + e.message;
+  }
 }
 
 refresh();
 setInterval(refresh, REFRESH_MS);
 setInterval(fetchProviderQuotas, 60000);
+setInterval(fetchHealth, 30000);  // 系统健康每30秒刷新
 </script>
 </body>
 </html>

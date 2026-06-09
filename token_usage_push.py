@@ -1,18 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Token 用量 Telegram 推送 - 每小时推送各平台额度和 Agent 会话状态"""
+"""每小时 Token 用量 Telegram 推送 - 沿用看板颜色逻辑"""
 import json, subprocess, urllib.request, time, os
 from datetime import datetime, timezone, timedelta
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# macOS 上 Python 不走系统代理，必须显式设置
+os.environ.setdefault('HTTP_PROXY', 'http://127.0.0.1:7890')
+os.environ.setdefault('HTTPS_PROXY', 'http://127.0.0.1:7890')
+# 但 urllib 在 import 时已经读取了环境变量，需要重建 opener
+proxy_handler = urllib.request.ProxyHandler({
+    'http': 'http://127.0.0.1:7890',
+    'https': 'http://127.0.0.1:7890',
+})
+urllib.request.install_opener(urllib.request.build_opener(proxy_handler))
 
-def load_config():
-    cfg_path = os.path.join(SCRIPT_DIR, 'config.json')
-    with open(cfg_path) as f:
-        return json.load(f)
+# 2026-06-03: 系统 crontab 残留每小时推送，OpenClaw cron 已接管。
+# 通过环境变量区分：OpenClaw 环境有 OPENCLAW_* 变量，系统 crontab 没有。
+import sys
+if 'OPENCLAW_CLI' not in os.environ and 'OPENCLAW_SERVICE_KIND' not in os.environ:
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 非 OpenClaw 环境，跳过推送", file=sys.stderr)
+    sys.exit(0)
 
-CFG = load_config()
 TZ = timezone(timedelta(hours=8))
+BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '')
+CHAT_ID = os.environ.get('TG_CHAT_ID', '')
+
+ZAI_KEY = os.environ.get('ZHIPU_ZAI_KEY', '')
+ZHIPU_KEY = os.environ.get('ZHIPU_DOMESTIC_KEY', '')
 
 AGENT_NAMES = {
     'main': '\U0001f9e2罗氏虾', 'xiaohexia': '\U0001f9e2小河虾',
@@ -38,6 +52,7 @@ def countdown(ts):
     return f"{h}时{m}分" if h > 0 else f"{m}分"
 
 def time_progress(ts, unit):
+    """返回时间进度百分比字符串，如 '71%'，无数据返回 None"""
     if not ts or unit not in PERIOD_MS: return None
     d = ts/1000 - time.time()
     period_s = PERIOD_MS[unit] / 1000
@@ -45,14 +60,13 @@ def time_progress(ts, unit):
     elapsed = period_s - remaining
     return f"{min(max(elapsed / period_s * 100, 0), 100):.0f}%"
 
-# 消耗速度 vs 时间进度
+# 沿用看板颜色逻辑：消耗速度 vs 时间进度
 def quota_status(used_pct, next_reset_ms, unit):
     if used_pct >= 100:
         return "\U0001f534已停"
-    if used_pct <= 0:
-        return "\U0001f535观察中"
     period = PERIOD_MS.get(unit)
     if not period or not next_reset_ms:
+        # fallback: 无时间信息，按固定百分比判断
         if used_pct >= 90: return "\U0001f534危险"
         if used_pct >= 60: return "\U0001f7e1偏快"
         return "\U0001f7e2安全"
@@ -73,9 +87,9 @@ def fetch_json(url, headers=None):
         return json.loads(r.read())
 
 def send_telegram(text):
-    payload = json.dumps({'chat_id': CFG['telegram']['chat_id'], 'text': text}).encode()
+    payload = json.dumps({'chat_id': CHAT_ID, 'text': text}).encode()
     req = urllib.request.Request(
-        f"https://api.telegram.org/bot{CFG['telegram']['bot_token']}/sendMessage",
+        f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage',
         data=payload,
         headers={'Content-Type': 'application/json'}
     )
@@ -87,8 +101,8 @@ def main():
 
     # 供应商额度
     for name, key, api in [
-        ("\U0001f30f 智谱海外(Z.AI)", CFG['zhipu']['overseas_key'], "https://api.z.ai/api/monitor/usage/quota/limit"),
-        ("\U0001f4e6 智谱国内(BigModel)", CFG['zhipu']['domestic_key'], "https://open.bigmodel.cn/api/monitor/usage/quota/limit"),
+        ("\U0001f30f 智谱海外(Z.AI)", ZAI_KEY, "https://api.z.ai/api/monitor/usage/quota/limit"),
+        ("\U0001f4e6 智谱国内(BigModel)", ZHIPU_KEY, "https://open.bigmodel.cn/api/monitor/usage/quota/limit"),
     ]:
         try:
             j = fetch_json(api, {'Authorization': f'Bearer {key}'})
@@ -97,6 +111,7 @@ def main():
             lines.append(f"{name} · {level.upper()}档")
             WEEKLY_PROMPTS = {'lite': 400, 'pro': 1500, 'max': 2400}
             WINDOW_PROMPTS = {'lite': 80, 'pro': 300, 'max': 600}
+            tag = '海外' if 'Z.AI' in name else '国内'
             for lim in j['data']['limits']:
                 if lim['type'] != 'TOKENS_LIMIT':
                     continue
@@ -105,37 +120,37 @@ def main():
                 label = {3: '5h窗口', 6: '周额度'}.get(lim['unit'], 'Token')
                 nrt = lim.get('nextResetTime')
                 status = quota_status(lim['percentage'], nrt, lim['unit'])
+                est_used = est_total - est_remain
                 tp = time_progress(nrt, lim['unit'])
                 tp_str = f"，时间进度 {tp}" if tp else ""
-                tag = '海外' if 'Z.AI' in name else '国内'
-                recovery = "已恢复" if lim['percentage'] == 0 and not nrt else countdown(nrt) + "恢复"
-                lines.append(f"  {status} [{tag}] {label}: {lim['percentage']}%已用{tp_str}，{recovery}")
+                lines.append(f"  {status} [{tag}] {label}: {lim['percentage']}%已用{tp_str}，{countdown(nrt)}恢复")
             lines.append("")
         except Exception as e:
             lines.append(f"{name}: \u274c {e}")
             lines.append("")
 
     # DeepSeek 余额
+    DS_KEY = os.environ.get('DEEPSEEK_KEY', '')
     try:
-        j = fetch_json('https://api.deepseek.com/user/balance',
-                       {'Authorization': f"Bearer {CFG['deepseek_key']}"})
+        j = fetch_json('https://api.deepseek.com/user/balance', {'Authorization': f'Bearer {DS_KEY}'})
         info = j.get('balance_infos', [{}])[0]
         total = info.get('total_balance', '?')
-        avail = '\u2705' if j.get('is_available') else '\u274c'
+        avail = '✅' if j.get('is_available') else '❌'
         cur = info.get('currency', 'CNY')
-        lines.append(f"{avail} DeepSeek 余额: {cur == 'CNY' and '\u00a5' or cur}{total}")
+        lines.append(f"{avail} DeepSeek 余额: {cur == 'CNY' and '¥' or cur}{total}")
         lines.append("")
     except Exception as e:
-        lines.append(f"\U0001f41f DeepSeek: \u274c {e}")
+        lines.append(f"\U0001f41f DeepSeek: ❌ {e}")
         lines.append("")
 
-    # Agent 会话
+    # Agent 会话 - 按agentId合并，显示全部员工
     try:
-        r = subprocess.run(['openclaw', 'sessions', '--json', '--all-agents', '--limit', '50'],
+        r = subprocess.run(['/opt/homebrew/bin/openclaw', 'sessions', '--json', '--all-agents', '--limit', '50'],
                           capture_output=True, text=True, timeout=15)
         d = json.loads(r.stdout)
         all_sessions = d.get('sessions', [])
 
+        # 合并同一 agent（只取最新主 direct session 的 total/ctx，其余计入子代理）
         merged = {}
         for s in all_sessions:
             aid = s.get('agentId', '?')
@@ -152,18 +167,22 @@ def main():
                 is_direct = False
 
             if is_direct:
+                # 收集所有 direct session，最后取最新的
                 m['_directs'].append(s)
-                m['sub'] += 1
+                m['sub'] += 1  # 多出来的 direct 也算子会话
             else:
                 m['sub'] += 1
 
+        # 对每个 agent，只取最新 active 的 direct session 作为主会话数据
         PROVIDER_LABELS = {'zai': '海外', 'zhipu': '国内', 'deepseek': 'DS', 'minimax': 'MiniMax', 'google': 'Google', 'ollama': '本地'}
         AGENTS_DIR = os.path.expanduser('~/.openclaw/agents')
 
         def last_actual_model(session_id, agent_id):
+            """从 transcript jsonl 读取最后一条 assistant 消息的实际 model/provider"""
             tdir = os.path.join(AGENTS_DIR, agent_id, 'sessions')
             if not os.path.isdir(tdir):
                 return None, None
+            # 优先找主 transcript (.jsonl)，排除 trajectory，其次找 reset/归档文件
             primary = []
             archive = []
             for fn in os.listdir(tdir):
@@ -171,6 +190,7 @@ def main():
                     primary.append(os.path.join(tdir, fn))
                 elif fn.startswith(session_id) and '.jsonl.reset.' in fn:
                     archive.append(os.path.join(tdir, fn))
+            # 优先主文件，其次归档（各按mtime排序）
             primary.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             archive.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             candidates = primary or archive
@@ -201,14 +221,16 @@ def main():
         for aid, m in merged.items():
             if not m['_directs']:
                 continue
+            # 按 updatedAt 排序，取最新的
             m['_directs'].sort(key=lambda s: s.get('updatedAt', 0), reverse=True)
             latest = m['_directs'][0]
             m['total'] = latest.get('totalTokens') or 0
             m['ctx'] = latest.get('contextTokens') or 200000
+            # 从 transcript 取实际使用的 model，fallback 到 session 配置
             actual_model, actual_provider = last_actual_model(latest.get('sessionId', ''), aid)
             m['model'] = actual_model or latest.get('model') or '-'
             m['provider'] = PROVIDER_LABELS.get(actual_provider, '') if actual_provider else PROVIDER_LABELS.get(latest.get('modelProvider', ''), latest.get('modelProvider', ''))
-            m['sub'] -= 1
+            m['sub'] -= 1  # 最新的那个是主会话，不算子会话
             del m['_directs']
 
         total_in = sum(m['in'] for m in merged.values())
