@@ -1,7 +1,5 @@
 # 🦐 Token Dashboard
 
-> **匡书记的虾厂出品** | [GitHub](https://github.com/ksiyuna-claw)
-
 OpenClaw 多 Agent 的 API 用量监控看板 + Telegram 定时推送。
 
 ## 功能
@@ -25,14 +23,11 @@ token_usage_push.py        ← TG 推送脚本（由 systemd timer 触发）
 
 ## 快速开始
 
-### 1. 设置环境变量
+### 1. 准备配置文件
 
 ```bash
-export ZHIPU_ZAI_KEY="your-zhipu-overseas-api-key"
-export ZHIPU_DOMESTIC_KEY="your-zhipu-domestic-api-key"
-export DEEPSEEK_KEY="your-deepseek-api-key"
-export TG_BOT_TOKEN="your-telegram-bot-token"
-export TG_CHAT_ID="your-telegram-chat-id"
+cp config.example.json config.json
+# 编辑 config.json，填入你的 API key
 ```
 
 ### 2. 启动看板
@@ -99,15 +94,52 @@ systemctl --user enable --now token-dashboard.service
 systemctl --user enable --now token-push.timer
 ```
 
-## 环境变量
+## 配置说明
 
-| 变量 | 说明 |
-|------|------|
-| `ZHIPU_ZAI_KEY` | 智谱海外 Coding Plan API Key (api.z.ai) |
-| `ZHIPU_DOMESTIC_KEY` | 智谱国内 API Key (open.bigmodel.cn) |
-| `DEEPSEEK_KEY` | DeepSeek API Key |
-| `TG_BOT_TOKEN` | Telegram Bot Token |
-| `TG_CHAT_ID` | 接收推送的 Telegram Chat ID |
+`config.json` 结构：
+
+```json
+{
+  "zhipu": {
+    "overseas_key": "智谱海外(Coding Plan) API Key",
+    "domestic_key": "智谱国内 API Key"
+  },
+  "deepseek_key": "DeepSeek API Key",
+  "telegram": {
+    "bot_token": "Telegram Bot Token",
+    "chat_id": "接收推送的 Chat ID"
+  },
+  "work_dir": "openclaw scripts 目录，存放 snapshot 和 HTML"
+}
+```
+
+## Provider 踩坑记录
+
+### Kimi (Moonshot) Coding Plan 额度查询
+**2026-06-29 踩坑总结**
+
+Kimi 有两套完全独立的 Key 体系，**不可混用**：
+
+| Key 类型 | 格式示例 | 用途 | 余额/额度查询端点 |
+|---------|---------|------|----------------|
+| **Coding Plan Key** | `sk-kimi-...` (72字符) | Coding/对话/API调用 | `https://api.kimi.com/coding/v1/usages` |
+| **Open Platform Key** | `sk-Hik...` (48字符) | 普通API按量付费 | `https://api.moonshot.cn/v1/users/me/balance` |
+
+**关键坑点**：
+1. **余额端点必须用 Coding Plan Key**：`api.moonshot.cn/v1/users/me/balance` 返回的是普通Open Platform余额，Coding Plan用户永远是0
+2. **Coding Plan 额度端点**：`api.kimi.com/coding/v1/usages`，返回周额度（7天滚动）+ 5分钟频限
+3. **必须带 User-Agent**：`KimiCLI/1.6`，否则 401
+4. **代理配置**：`api.kimi.com` 也需要走代理（和 DeepSeek/MiniMax 一样）
+
+**返回数据示例**：
+```json
+{
+  "usage": {"limit": "100", "used": "1", "remaining": "99", "resetTime": "2026-07-06T06:44:44Z"},
+  "limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"}, "detail": {"limit": "100", "used": "6", "remaining": "94"}}]
+}
+```
+
+---
 
 ## 告警逻辑
 
