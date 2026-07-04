@@ -11,14 +11,15 @@ OpenClaw 多 Agent 的 API 用量监控看板 + Telegram 定时推送。
 ## 架构
 
 ```
-token_dashboard_server.py   ← HTTP 服务 (端口 18888)
-  ├── 托管 token_dashboard.html 前端
+token_dashboard_server.py   ← HTTP 服务 (端口 18888)，内嵌前端页面
   ├── /quota-overseas     ← 代理智谱海外 API
   ├── /quota-domestic     ← 代理智谱国内 API
   ├── /quota-deepseek     ← 代理 DeepSeek API
+  ├── /quota-minimax      ← 代理 MiniMax API
+  ├── /quota-kimi         ← 代理 Kimi Coding Plan API
   └── /sessions-json      ← 代理 openclaw sessions
 
-token_usage_push.py        ← TG 推送脚本（由 systemd timer 触发）
+本仓库只包含核心服务端。前端 HTML 和 TG 推送脚本请在部署时按需配置。
 ```
 
 ## 快速开始
@@ -37,62 +38,9 @@ python3 token_dashboard_server.py
 # 浏览器访问 http://127.0.0.1:18888/
 ```
 
-### 3. 配置定时推送（systemd）
+### 3. 配置定时推送
 
-```bash
-mkdir -p ~/.config/systemd/user/
-
-# 看板常驻服务
-cat > ~/.config/systemd/user/token-dashboard.service << 'EOF'
-[Unit]
-Description=Token Dashboard
-After=network.target
-
-[Service]
-Type=simple
-Environment=PATH=/home/YOUR_USER/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
-Environment=HTTP_PROXY=http://127.0.0.1:7890
-Environment=HTTPS_PROXY=http://127.0.0.1:7890
-ExecStart=/usr/bin/python3 /path/to/token_dashboard_server.py
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
-
-# 推送服务（oneshot）
-cat > ~/.config/systemd/user/token-push.service << 'EOF'
-[Unit]
-Description=Token Push
-After=network.target
-
-[Service]
-Type=oneshot
-Environment=HTTP_PROXY=http://127.0.0.1:7890
-Environment=HTTPS_PROXY=http://127.0.0.1:7890
-Environment=PATH=/home/YOUR_USER/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 /path/to/token_usage_push.py
-EOF
-
-# 定时器（每6小时）
-cat > ~/.config/systemd/user/token-push.timer << 'EOF'
-[Unit]
-Description=Token Push Timer
-
-[Timer]
-OnCalendar=00/6:00
-Persistent=false
-
-[Install]
-WantedBy=timers.target
-EOF
-
-# 启动
-systemctl --user daemon-reload
-systemctl --user enable --now token-dashboard.service
-systemctl --user enable --now token-push.timer
-```
+TG 推送脚本不包含在本仓库中。请根据你的环境（systemd / launchctl / cron）自行配置定时调用推送脚本。
 
 ## 配置说明
 
