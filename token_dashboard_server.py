@@ -2124,7 +2124,8 @@ class H(http.server.SimpleHTTPRequestHandler):
         else:
             if self.path == '/' or self.path == '/token_dashboard.html':
                 # 防止浏览器缓存旧版 HTML（导致 JS 不更新）
-                html_path = os.path.join(DIR, 'token_dashboard.html')
+                # 2026-08-20 模板移入项目 templates/ 纳管（脱离 scripts/ 双git夹缝），随项目git版本化
+                html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates', 'token_dashboard.html')
                 try:
                     with open(html_path, 'rb') as f:
                         content = f.read()

@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🦐 虾厂 Token 看板</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --dim: #8b949e; --green: #3fb950; --yellow: #d29922; --red: #f85149; --blue: #58a6ff; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 20px; max-width: 1100px; margin: 0 auto; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 8px; }
+  .header h1 { font-size: 22px; }
+  .header .meta { font-size: 13px; color: var(--dim); }
+  .section { margin-bottom: 28px; }
+  .section-title { font-size: 14px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .provider-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 900px) { .provider-grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card .provider-name { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .card .provider-sub { font-size: 11px; color: var(--dim); margin-bottom: 12px; }
+  /* 2026-08-07 海外智谱Coding Plan到期下线，代码保留备用 */
+  /* 海外智谱额度卡：蓝色左边框 + 蓝标题 + 🌐，与国内区分 */
+  /* .card-overseas { border-left: 3px solid var(--blue); } */
+  /* .card-overseas .provider-name { color: var(--blue); } */
+  /* .overseas-badge { font-size: 12px; margin-left: 4px; } */
+  .quota-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(48,54,61,0.5); }
+  .quota-row:last-child { border-bottom: none; }
+  .quota-row .label { font-size: 13px; color: var(--dim); }
+  .quota-row .main-col { flex: 1; min-width: 0; }
+  .quota-row .value { font-size: 18px; font-weight: 700; }
+  .quota-row .sub { font-size: 11px; color: var(--dim); margin-top: 2px; }
+  .progress-bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 6px; overflow: hidden; }
+  .progress-bar .fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+  .countdown { font-size: 11px; color: var(--blue); }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .tag-green { background: rgba(63,185,80,0.15); color: var(--green); }
+  .tag-blue { background: rgba(88,166,255,0.15); color: #58a6ff; }
+  .tag-yellow { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .tag-red { background: rgba(248,81,73,0.15); color: var(--red); }
+  .no-quota { color: var(--dim); font-size: 13px; font-style: italic; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 12px; color: var(--dim); padding: 8px 10px; border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 8px 10px; font-size: 13px; border-bottom: 1px solid var(--border); }
+  tr:hover { background: rgba(255,255,255,0.02); }
+  .ctx-bar { display: inline-block; height: 4px; background: var(--border); border-radius: 2px; width: 60px; vertical-align: middle; overflow: hidden; }
+  .ctx-bar .fill { height: 100%; border-radius: 2px; }
+  .error { color: var(--red); font-size: 13px; padding: 8px; background: rgba(248,81,73,0.08); border-radius: 6px; }
+  .loading { color: var(--dim); text-align: center; padding: 20px; font-size: 13px; }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .summary-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; text-align: center; }
+  .summary-card .val { font-size: 20px; font-weight: 700; }
+  .summary-card .lbl { font-size: 11px; color: var(--dim); margin-top: 4px; }
+  .health-card .val { font-size: 18px !important; }
+  .provider-tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; margin-left: 4px; }
+  /* 2026-08-07 海外智谱Coding Plan到期下线，代码保留备用 */
+  /* .provider-tag-zai { background: rgba(88,166,255,0.15); color: var(--blue); } */
+  .provider-tag-zhipu { background: rgba(63,185,80,0.15); color: var(--green); }
+  .provider-tag-deepseek { background: rgba(248,81,73,0.15); color: var(--red); }
+  /* 2026-07-23 MiniMax套餐到期下线，代码保留备用 */
+  /* .provider-tag-minimax { background: rgba(210,153,34,0.15); color: var(--yellow); } */
+  .provider-tag-google { background: rgba(88,166,255,0.1); color: #8ab4f8; }
+  .provider-tag-ollama { background: rgba(255,255,255,0.05); color: var(--dim); }
+  .provider-tag-kimi { background: rgba(255,105,180,0.15); color: #ff69b4; }
+  .tab-bar { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+  .tab-btn { background: transparent; border: 1px solid var(--border); color: var(--dim); padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: all 0.2s; }
+  .tab-btn:hover { border-color: var(--blue); color: var(--text); }
+  .tab-btn.active { background: rgba(88,166,255,0.12); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+  .tab-badge { display: inline-block; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; font-size: 10px; background: var(--border); color: var(--dim); margin-left: 4px; padding: 0 4px; }
+  .tab-btn.active .tab-badge { background: rgba(88,166,255,0.25); color: var(--blue); }
+  .kind-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-right: 4px; }
+  .kind-badge-subagent { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .kind-badge-slash { background: rgba(139,148,158,0.15); color: var(--dim); }
+  .kind-badge-weixin { background: rgba(63,185,80,0.15); color: var(--green); }
+  .kind-badge-heartbeat { background: rgba(255,105,180,0.12); color: #ff69b4; }
+  .empty-msg { color: var(--dim); text-align: center; padding: 24px; font-size: 13px; }
+  /* Cron module */
+  .cron-subtitle { font-size: 12px; color: var(--dim); margin-bottom: 8px; }
+  .cron-table { margin-bottom: 16px; }
+  .cron-table:last-child { margin-bottom: 0; }
+  .cron-table th { font-size: 11px; }
+  .cron-table td { font-size: 12px; }
+  .cron-status-ok { color: var(--green); }
+  .cron-status-error { color: var(--red); font-weight: 700; }
+  .cron-status-unknown { color: var(--dim); }
+  .cron-row-error { background: rgba(248,81,73,0.08); }
+  .cron-row-disabled { opacity: 0.4; }
+  .cron-row-comment { opacity: 0.4; font-style: italic; }
+  /* Agent status cards - unified */
+  .agent-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+  .agent-card { background: var(--card); border: 2px solid var(--border); border-radius: 10px; padding: 14px; transition: all 0.3s; }
+  .agent-card .ac-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .agent-card .ac-name { font-size: 14px; font-weight: 600; }
+  .agent-card .ac-status-icon { font-size: 20px; line-height: 1; }
+  .agent-card .ac-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
+  .agent-card .ac-label { color: var(--dim); }
+  .agent-card .ac-val { font-weight: 600; font-size: 12px; }
+  .agent-card .ac-ctx-bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+  .agent-card .ac-ctx-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
+  .agent-card .ac-sub { font-size: 10px; color: var(--dim); margin-top: 2px; }
+  /* 模型分布区（最近 N 条分布 + 时间戳）*/
+  .agent-card .ac-model { padding: 4px 0 1px; height: 34px; overflow: hidden; }
+  .agent-card .ac-model-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .agent-card .ac-model-chips { display: flex; flex-wrap: nowrap; gap: 4px; height: 20px; overflow: hidden; align-items: center; }
+  .agent-card .ac-mchip { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; line-height: 1.5; white-space: nowrap; }
+  .agent-card .ac-mchip em { font-style: normal; font-weight: 500; font-size: 10px; opacity: 0.7; margin-left: 2px; }
+  /* 压缩模式（模型≥3）：色点 + 首字母，hover 看全名 */
+  .agent-card .ac-mchip-mini { display: inline-flex; align-items: center; gap: 3px; padding: 1px 5px 1px 4px; }
+  .agent-card .ac-mdot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  /* 当前（最新调用）模型：循环光扫标识“正在跑” */
+  .agent-card .ac-mchip-cur { position: relative; overflow: hidden; }
+  .agent-card .ac-mchip-cur::after { content: ''; position: absolute; top: 0; left: -60%; width: 45%; height: 100%; background: linear-gradient(100deg, transparent, rgba(255,255,255,0.5), transparent); animation: mchip-sweep 2.4s ease-in-out infinite; pointer-events: none; }
+  @keyframes mchip-sweep { 0% { left: -60%; } 55%, 100% { left: 130%; } }
+  /* chip 颜色由 JS 按模型固定色注入（MODEL_COLORS / colorForModel），不再分主力/fallback */
+  .agent-card .ac-mbar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 5px; background: var(--border); }
+  .agent-card .ac-mbar > div { height: 100%; }
+  .agent-card-working { border-color: var(--green); background: rgba(63,185,80,0.08); box-shadow: 0 0 12px rgba(63,185,80,0.2); animation: pulse-work 2s infinite; }
+  .agent-card-waiting { border-color: var(--yellow); background: rgba(210,153,34,0.06); }
+  .agent-card-idle { opacity: 0.5; }
+  @keyframes pulse-work { 0%,100% { box-shadow: 0 0 8px rgba(63,185,80,0.12); } 50% { box-shadow: 0 0 18px rgba(63,185,80,0.4); } }
+  .spin-icon { display: inline-block; animation: spin-icon 1.5s linear infinite; }
+  @keyframes spin-icon { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🦐 虾厂 Token 看板</h1>
+  <div class="meta">
+    <div><span id="lastUpdate">加载中...</span> · 额度数据每5分钟刷新 · 虾厂状态每15秒刷新 · <a href="/cron" style="color:var(--blue);text-decoration:none;border:1px solid var(--border);padding:2px 8px;border-radius:4px;font-size:12px">📋 定时任务总览</a></div>
+    <div style="font-size:11px;color:var(--green);margin-top:2px" id="statusUpdate">状态更新中...</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">🦐 虾厂员工 <span id="agentStatusSummary" style="font-size:12px;color:var(--dim);font-weight:normal;margin-left:8px"></span></div>
+  <div class="tab-bar" id="sessionTabs">
+    <button class="tab-btn active" data-filter="direct" onclick="switchTab(this)">主会话<span class="tab-badge" id="badge-direct">0</span></button>
+    <button class="tab-btn" data-filter="heartbeat" onclick="switchTab(this)">💓心跳<span class="tab-badge" id="badge-heartbeat">0</span></button>
+    <button class="tab-btn" data-filter="subagent" onclick="switchTab(this)">子代理<span class="tab-badge" id="badge-subagent">0</span></button>
+    <button class="tab-btn" data-filter="slash" onclick="switchTab(this)">Slash<span class="tab-badge" id="badge-slash">0</span></button>
+    <button class="tab-btn" data-filter="weixin" onclick="switchTab(this)">微信Bot<span class="tab-badge" id="badge-weixin">0</span></button>
+    <button class="tab-btn" data-filter="system" onclick="switchTab(this)">系统<span class="tab-badge" id="badge-system">0</span></button>
+    <button class="tab-btn" data-filter="all" onclick="switchTab(this)">全部<span class="tab-badge" id="badge-all">0</span></button>
+    <span id="sessionCount" style="font-size:11px;color:var(--dim);margin-left:auto;align-self:center"></span>
+  </div>
+  <div class="agent-card-grid" id="agentCardGrid"><div class="loading">正在获取...</div></div>
+</div>
+
+<div class="section">
+  <div class="section-title">📦 模型供应商额度</div>
+  <div class="provider-grid" id="providerGrid"><div class="loading">正在获取...</div></div>
+</div>
+
+<div class="section" id="emailSection">
+  <div class="section-title">📬 邮箱监控 <span id="emailSummary" style="font-size:12px;color:var(--dim);font-weight:normal;margin-left:8px"></span></div>
+  <div class="card" id="emailCard"><div class="loading">正在获取...</div></div>
+</div>
+
+<div class="section" id="healthSection">
+  <div class="section-title">🩺 系统健康</div>
+  <div class="summary-grid" id="healthGrid">
+    <div class="summary-card"><div class="val" id="hCpu">...</div><div class="lbl">CPU 使用率</div></div>
+    <div class="summary-card"><div class="val" id="hMem">...</div><div class="lbl">内存</div></div>
+    <div class="summary-card"><div class="val" id="hSwap">...</div><div class="lbl">Swap</div></div>
+    <div class="summary-card"><div class="val" id="hDisk">...</div><div class="lbl">磁盘 /</div></div>
+    <div class="summary-card"><div class="val" id="hLoad">...</div><div class="lbl">负载 1m/5m/15m</div></div>
+    <div class="summary-card"><div class="val" id="hCdp">...</div><div class="lbl">CDP Chrome</div></div>
+  </div>
+  <div id="cdpWarn" style="display:none;margin-top:10px;padding:8px 12px;background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.3);border-radius:6px;font-size:12px;color:var(--red)"></div>
+</div>
+
+<div class="section" id="cronSection">
+  <div class="section-title">⏱ 定时任务</div>
+  <div class="cron-subtitle" id="cronSubtitle">正在获取...</div>
+  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">📋 OpenClaw 定时任务</div><div class="cron-table"><table><thead><tr><th>任务名</th><th>Agent</th><th>用途</th><th>周期</th><th>上次执行</th><th>状态</th><th>下次执行</th></tr></thead><tbody id="cronOpenclawBody"><tr><td colspan="7" class="loading">正在获取...</td></tr></tbody></table></div></div>
+  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">⚙️ 系统 Crontab</div><div class="cron-table"><table><thead><tr><th>用途</th><th>周期</th><th>命令 <small style="color:var(--dim)">（点击展开）</small></th></tr></thead><tbody id="cronCrontabBody"><tr><td colspan="3" class="loading">正在获取...</td></tr></tbody></table></div></div>
+  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🖥️ 系统服务</div><div class="cron-table"><table><thead><tr><th>服务名</th><th>用途</th><th>运行方式</th><th>开机启动</th><th>状态</th></tr></thead><tbody id="cronLaunchBody"><tr><td colspan="5" class="loading">正在获取...</td></tr></tbody></table></div></div>
+  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🧠 Gateway 健康</div><div id="gatewayHealthBox" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim)">加载中...</div></div>
+  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">📦 Hermes 网关健康</div><div id="hermesHealthBox" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim)">加载中...</div></div>
+  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🔄 Web前端轮询</div><div class="cron-table"><table><thead><tr><th>页面</th><th>刷新周期</th><th>说明</th></tr></thead><tbody>
+  <tr><td>🦐 Token看板</td><td>每15秒</td><td>虾厂工作状态轮询（不消耗token）</td></tr>
+  <tr><td>🦐 Token看板</td><td>每30秒</td><td>系统健康数据轮询</td></tr>
+  <tr><td>🦐 Token看板</td><td>每60秒</td><td>模型供应商额度轮询</td></tr>
+  <tr><td>🦐 Token看板</td><td>每5分钟</td><td>员工会话 + 定时任务列表刷新</td></tr>
+  </tbody></table></div></div>
+  <div class="cron-table" id="heartbeatTableWrap" style="display:none"><table><thead><tr><th>虾</th><th>心跳周期</th><th>投递目标</th><th>状态</th></tr></thead><tbody id="heartbeatBody"></tbody></table></div>
+</div>
+
+<div class="section">
+  <div class="section-title">📊 总览</div>
+  <div class="summary-grid" id="summaryGrid"><div class="loading">正在获取...</div></div>
+</div>
+
+<div class="section" id="systemTaskSection">
+  <div class="section-title">🖥️ 系统任务 <span id="systemTaskSummary" style="font-size:12px;color:var(--dim);font-weight:normal;margin-left:8px"></span></div>
+  <div class="card" id="systemTaskCard" style="font-size:13px"><div class="loading">正在获取...</div></div>
+</div>
+
+<script>
+const REFRESH_MS = 5 * 60 * 1000;
+
+const AGENT_ORDER = ['main','xiaohexia','jiweixia','pipixia','caoxia','banjiexia','duijiaoxia','shanbei','hailuo','haixing','haima','yoooclaw'];
+const AGENT_NAMES = {main:'罗氏虾',xiaohexia:'小河虾',jiweixia:'基围虾',pipixia:'皮皮虾',caoxia:'草虾',banjiexia:'斑节虾',duijiaoxia:'对焦虾',shanbei:'扇贝',hailuo:'海螺',haixing:'海星',haima:'海马',yoooclaw:'YoooClaw'};
+const AGENT_EMOJI = {main:'🦞',xiaohexia:'🦐',jiweixia:'🏙',pipixia:'🦐',caoxia:'🦐',banjiexia:'🦐',duijiaoxia:'🔍',shanbei:'🦪',hailuo:'🐚',haixing:'⭐',haima:'🔱',yoooclaw:'🐾'};
+const PROVIDER_LABELS = {
+  /* 2026-08-07 海外智谱Coding Plan到期下线，代码保留备用 */
+  // zai: {text:'海外', cls:'provider-tag-zai'},
+  zhipu: {text:'国内', cls:'provider-tag-zhipu'},
+  deepseek: {text:'DS', cls:'provider-tag-deepseek'},
+  /* 2026-07-23 MiniMax套餐到期下线，代码保留备用 */
+  // minimax: {text:'MiniMax', cls:'provider-tag-minimax'},
+  google: {text:'Google', cls:'provider-tag-google'},
+  ollama: {text:'本地', cls:'provider-tag-ollama'},
+  kimi: {text:'Kimi', cls:'provider-tag-kimi'},
+};
+
+function fmt(n) {
+  if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n/1000).toFixed(1) + 'K';
+  return String(n);
+}
+function countdown(ts) {
+  if (!ts) return '-';
+  const d = ts - Date.now();
+  if (d <= 0) return '已恢复';
+  const h = Math.floor(d/3600000), m = Math.floor((d%3600000)/60000);
+  if (h > 24) return Math.floor(h/24) + '天' + (h%24) + '小时后';
+  return h > 0 ? h+'时'+m+'分后' : m+'分钟后';
+}
+function timeProgress(ts, unit) {
+  if (!ts) return '';
+  const period = PERIOD_MS[unit];
+  if (!period) return '';
+  const d = ts - Date.now();
+  const remaining = Math.max(d, 0);
+  const elapsed = period - remaining;
+  const pct = Math.min(Math.max(elapsed / period * 100, 0), 100).toFixed(0);
+  return `，时间进度 ${pct}%`;
+}
+
+// ===== Session 分类 =====
+// 按 key 模式分类，优先级从高到低
+const CATEGORY_RULES = [
+  { id: 'subagent', test: k => k.includes(':subagent:'),                         label: '子代理',   badgeCls: 'kind-badge-subagent' },
+  { id: 'heartbeat',test: k => k.includes(':heartbeat'),                          label: '心跳',     badgeCls: 'kind-badge-heartbeat' },
+  { id: 'slash',    test: k => k.includes(':slash:'),                            label: 'slash',    badgeCls: 'kind-badge-slash' },
+  { id: 'weixin',   test: k => k.includes('openclaw-weixin'),                    label: '微信',     badgeCls: 'kind-badge-weixin' },
+  { id: 'direct',   test: k => (k.includes('telegram:direct') || k.includes(':direct:')) && !k.includes(':heartbeat'), label: '主会话', badgeCls: '' },
+  { id: 'system',   test: k => k.endsWith(':main') || (k.includes(':main') && !k.includes(':subagent:')), label: '系统', badgeCls: 'kind-badge-system' },
+];
+
+function classifySession(s) {
+  const key = s.key || '';
+  for (const rule of CATEGORY_RULES) {
+    if (rule.test(key)) return rule;
+  }
+  return { id: 'other', label: '其他', badgeCls: '' };
+}
+
+// ===== 统一状态判定系统 =====
+const PERIOD_MS = {3: 5*3600000, 6: 7*24*3600000, 5: 24*3600000};
+
+function getQuotaStatus(usedPct, nextReset, unit) {
+  if (usedPct >= 100) return 'stopped';
+  if (usedPct <= 0)    return 'bright_safe';
+  const period = PERIOD_MS[unit];
+  if (!period || !nextReset) {
+    if (usedPct >= 90) return 'danger';
+    if (usedPct >= 60) return 'warn';
+    return 'safe';
+  }
+  const elapsed = period - (nextReset - Date.now());
+  if (elapsed <= 0 || elapsed < 10 * 60 * 1000) return 'bright_safe';
+  const timePct = Math.min(elapsed / period * 100, 100);
+  const ratio = usedPct / Math.max(timePct, 0.1);
+  if (ratio < 1.0) return 'safe';
+  if (ratio < 1.5) return 'warn';
+  return 'danger';
+}
+
+const STATUS_COLOR = {bright_safe:'#58a6ff', safe:'var(--green)', warn:'var(--yellow)', danger:'#f0883e', stopped:'var(--red)'};
+const STATUS_TAG   = {bright_safe:'观察中', safe:'安全', warn:'偏快', danger:'危险', stopped:'已停'};
+const STATUS_CLS   = {bright_safe:'tag-blue', safe:'tag-green', warn:'tag-yellow', danger:'tag-red', stopped:'tag-red'};
+
+function quotaColor(usedPct, nextReset, unit) { return STATUS_COLOR[getQuotaStatus(usedPct, nextReset, unit)]; }
+function quotaTag(usedPct, nextReset, unit) {
+  const s = getQuotaStatus(usedPct, nextReset, unit);
+  return `<span class="tag ${STATUS_CLS[s]}">${STATUS_TAG[s]}</span>`;
+}
+function pctColor(p) { return STATUS_COLOR[getQuotaStatus(p, null, null)]; }
+function providerTag(p) {
+  const info = PROVIDER_LABELS[p];
+  if (!info) return '';
+  return `<span class="provider-tag ${info.cls}">${info.text}</span>`;
+}
+
+// ===== 模型分布渲染（最近 N 条分布 + 时间戳）=====
+function mEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+// 每种模型固定一个颜色（与用量多少/主力/fallback 无关），跨所有卡片一致。
+// c=实色（文字+占比条），bg=低饱和淡背景（chip）。按模型名关键词匹配。
+const MODEL_COLORS = [
+  { k: ['deepseek'],              c: '#58a6ff', bg: 'rgba(88,166,255,0.13)' },  // 蓝
+  { k: ['glm', 'zhipu', '智谱'],   c: '#3fb950', bg: 'rgba(63,185,80,0.14)' },   // 绿
+  { k: ['qwen', '千问', 'tongyi'], c: '#f0883e', bg: 'rgba(240,136,62,0.15)' },  // 橙
+  /* 2026-07-23 MiniMax套餐到期下线，代码保留备用 */
+  // { k: ['minimax'],              c: '#bc8cff', bg: 'rgba(188,140,255,0.15)' },  // 紫
+  { k: ['kimi', 'moonshot'],     c: '#ff69b4', bg: 'rgba(255,105,180,0.15)' },  // 粉
+];
+const MODEL_COLOR_DEFAULT = { c: '#8b949e', bg: 'rgba(139,148,158,0.14)' };     // 灰兜底
+function colorForModel(model) {
+  const m = String(model || '').toLowerCase();
+  for (const e of MODEL_COLORS) {
+    if (e.k.some(kw => m.includes(kw.toLowerCase()))) return e;
+  }
+  return MODEL_COLOR_DEFAULT;
+}
+// 模型名 → 短缩写（压缩模式色点旁显示），hover 看全名
+function modelAbbr(model) {
+  const m = String(model || '').toLowerCase();
+  if (m.includes('deepseek')) return 'DS';
+  if (m.includes('glm')) return 'GLM';
+  if (m.includes('qwen') || m.includes('千问') || m.includes('tongyi')) return 'QW';
+  /* 2026-07-23 MiniMax套餐到期下线，代码保留备用 */
+  // if (m.includes('minimax')) return 'MM';
+  if (m.includes('kimi') || m.includes('moonshot')) return 'Kimi';
+  if (m.includes('gpt')) return 'GPT';
+  if (m.includes('claude')) return 'CL';
+  if (m.includes('gemini')) return 'GM';
+  return (String(model || '?').replace(/[^a-z0-9]/gi, '').slice(0, 3).toUpperCase()) || '?';
+}
+// 生成模型分布区 HTML；最新调用的模型排最左并加光扫标识(当前在跑)；模型≥3时压缩成色点+首字母(hover看全名)；占比条按次数分段。
+function renderModelArea(stat) {
+  const distRaw = (stat && stat.modelDist) || [];
+  const last = (stat && stat.modelLast) || null;
+  // 无近期调用分布时，渲染灰色空占位条（保持所有卡片视觉一致），并保留配置模型名提示
+  if (!distRaw.length) {
+    /* 2026-08-07 海外智谱Coding Plan到期下线，代码保留备用 */
+    // const isOverseasSession = stat && (stat.modelProvider === 'zai');
+    const fm = (stat && stat.model && stat.model !== '-') ? stat.model : '';
+    const overseasSfx = ''; // was: isOverseasSession ? ' 🌐' : ''
+    const chip = fm
+      ? `<span class="ac-mchip" style="background:rgba(139,148,158,0.14);color:var(--dim)" title="配置模型，暂无近期调用记录">${mEsc(fm)}<em>暂无调用</em>${overseasSfx}</span>`
+      : `<span class="ac-mchip" style="background:rgba(139,148,158,0.14);color:var(--dim)">暂无调用</span>`;
+    return `<div class="ac-model"><div class="ac-model-chips">${chip}</div><div class="ac-mbar"></div></div>`;
+  }
+  // 排序：先按次数降序（防御兜底），再把“最新调用的模型”提到最左 —— 最左即当前在跑
+  const dist = [...distRaw].sort((a, b) => (b.count || 0) - (a.count || 0));
+  if (last && last.model) {
+    let j = dist.findIndex(d => d.model === last.model && (d.provider || '') === (last.provider || ''));
+    if (j < 0) j = dist.findIndex(d => d.model === last.model);
+    if (j > 0) { const [cur] = dist.splice(j, 1); dist.unshift(cur); }
+  }
+  const total = dist.reduce((a, b) => a + (b.count || 0), 0) || 1;
+  const compress = dist.length >= 3;  // 模型种类 ≥3 → 压缩成 色点+首字母（hover 看全名）
+  const chips = dist.map((d, idx) => {
+    const col = colorForModel(d.model);
+    const isCur = idx === 0;          // 最左 = 最新调用 = 当前在跑
+    const isOverseas = false; // 2026-08-07 海外智谱Coding Plan到期下线
+    const pct = Math.round((d.count / total) * 100);
+    const full = `${d.model}${isOverseas ? ' [海外]' : ''} · ${d.provider || '?'} · 近${total}条中 ${d.count} 次 (${pct}%)`;
+    const curCls = isCur ? ' ac-mchip-cur' : '';
+    if (compress) {
+      return `<span class="ac-mchip ac-mchip-mini${curCls}" style="background:${col.bg};color:${col.c}" title="${mEsc(full)}"><span class="ac-mdot" style="background:${col.c}"></span>${mEsc(modelAbbr(d.model))}${isOverseas ? '🌐' : ''}</span>`;
+    }
+    return `<span class="ac-mchip${curCls}" style="background:${col.bg};color:${col.c}" title="${mEsc(full)}">${mEsc(d.model)}<em>×${d.count}</em>${isOverseas ? ' 🌐' : ''}</span>`;
+  }).join('');
+  // 占比条：按 dist 顺序（最左=当前）分段，宽度按次数占比
+  const segs = dist.map((d, i) => {
+    const w = dist.length === 1 ? 100 : Math.max(4, Math.round((d.count / total) * 100));
+    const col = colorForModel(d.model).c;
+    const pct = Math.round((d.count / total) * 100);
+    const segTitle = `${d.model} · ${d.count}次 (${pct}%)`;
+    const sep = i < dist.length - 1 ? ';box-shadow:inset -1px 0 0 rgba(13,17,23,0.55)' : '';
+    return `<div style="width:${w}%;background:${col}${sep}" title="${mEsc(segTitle)}"></div>`;
+  }).join('');
+  const bar = `<div class="ac-mbar">${segs}</div>`;
+  // 时间戳已删除（最左 chip 即代表最新调用，时间信息冗余）
+  return `<div class="ac-model"><div class="ac-model-chips">${chips}</div>${bar}</div>`;
+}
+
+function renderQuotaCard(name, subtitle, limits, level) {
+  const isOverseas = false; // 2026-08-07 海外智谱Coding Plan到期下线
+  let rows = '';
+  for (const l of limits) {
+    if (l.type === 'TIME_LIMIT') continue;
+    if (l.type === 'TOKENS_LIMIT') {
+      const c = quotaColor(l.percentage, l.nextResetTime, l.unit);
+      const tag = quotaTag(l.percentage, l.nextResetTime, l.unit);
+      const label = l.unit === 3 ? '5小时窗口' : l.unit === 6 ? '周额度' : 'Token';
+      rows += `<div class="quota-row">
+        <div class="main-col"><div class="label">${label}</div><div class="sub">${l.percentage}% 已用</div>
+          <div class="progress-bar"><div class="fill" style="width:${l.percentage}%;background:${c}"></div></div>
+          <div class="countdown">${l.percentage===0&&!l.nextResetTime?'✅ 已恢复':`🔄 ${l.percentage}%已用${timeProgress(l.nextResetTime, l.unit)}，${countdown(l.nextResetTime)} 恢复`}</div>
+        </div>
+        <div style="text-align:right">${tag}</div>
+      </div>`;
+    }
+  }
+  return rows ? `<div class="card${isOverseas ? ' card-overseas' : ''}"><div class="provider-name">${name}${isOverseas ? ' <span class="overseas-badge">🌐</span>' : ''}</div><div class="provider-sub">${subtitle}</div>${rows}</div>` : '';
+}
+
+function renderNoQuota(name, subtitle, note) {
+  const isOverseas = false; // 2026-08-07 海外智谱Coding Plan到期下线
+  return `<div class="card${isOverseas ? ' card-overseas' : ''}"><div class="provider-name">${name}${isOverseas ? ' <span class="overseas-badge">🌐</span>' : ''}</div><div class="provider-sub">${subtitle}</div><div class="no-quota">${note}</div></div>`;
+}
+
+async function fetchProviderQuotas() {
+  const cards = [];
+  try {
+    // 动态获取 provider 列表
+    const pr = await fetch('/providers');
+    const providers = await pr.json();
+    if (providers.error) throw new Error(providers.error);
+    // 并发请求每个 provider 的额度
+    const results = await Promise.allSettled(
+      providers.map(async p => {
+        const r = await fetch('/quota/' + p.id);
+        return { provider: p, data: await r.json() };
+      })
+    );
+    for (let i = 0; i < results.length; i++) {
+      const res = results[i];
+      const p = providers[i];
+      if (res.status !== 'fulfilled') {
+        cards.push(renderNoQuota(p.label, p.baseUrl.split('//')[1]?.split('/')[0] || '', '请求失败'));
+        continue;
+      }
+      const j = res.value.data;
+      const host = p.baseUrl.split('//')[1].split('/')[0];
+      if (p.quotaType === 'zhipu_quota') {
+        if (j.code === 200) {
+          cards.push(renderQuotaCard(p.label, host + ' · ' + (j.data.level||'').toUpperCase() + ' 档', j.data.limits, j.data.level));
+        } else if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '代理错误: '+j.error));
+        } else {
+          cards.push(renderNoQuota(p.label, host, '返回格式异常'));
+        }
+      } else if (p.quotaType === 'deepseek_balance') {
+        if (j.is_available !== undefined) {
+          const info = j.balance_infos && j.balance_infos[0];
+          if (info) {
+            const total = parseFloat(info.total_balance || 0).toFixed(2);
+            const availTag = j.is_available ? '<span class="tag tag-green">可用</span>' : '<span class="tag tag-red">不可用</span>';
+            cards.push('<div class="card"><div class="provider-name">' + p.label + '</div><div class="provider-sub">' + host + ' · 按量付费</div>' +
+              '<div class="quota-row"><div><div class="label">余额（' + (info.currency || 'CNY') + '）</div></div><div class="value" style="color:var(--green)">¥' + total + '</div></div>' +
+              '<div class="quota-row" style="border:none"><div></div>' + availTag + '</div></div>');
+          } else {
+            cards.push(renderNoQuota(p.label, host, '无余额信息'));
+          }
+        } else if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
+        } else {
+          cards.push(renderNoQuota(p.label, host, '返回格式异常'));
+        }
+      /* 2026-07-23 MiniMax套餐到期下线，代码保留备用
+      } else if (p.quotaType === 'minimax_quota') {
+        if (j.base_resp && j.base_resp.status_code === 0 && Array.isArray(j.model_remains)) {
+          const gen = j.model_remains.find(m => m.model_name === 'general') || j.model_remains[0];
+          if (gen) {
+            const limits = [
+              {type:'TOKENS_LIMIT', unit:3, percentage: Math.max(0, 100 - (gen.current_interval_remaining_percent||0)), nextResetTime: gen.end_time},
+              {type:'TOKENS_LIMIT', unit:6, percentage: Math.max(0, 100 - (gen.current_weekly_remaining_percent||0)), nextResetTime: gen.weekly_end_time},
+            ];
+            cards.push(renderQuotaCard(p.label, host + ' · 编程套餐', limits));
+          } else {
+            cards.push(renderNoQuota(p.label, host, '无套餐数据'));
+          }
+        } else if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '代理错误: ' + j.error));
+        } else {
+          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+        }
+      */
+      } else if (p.quotaType === 'kimi_balance') {
+        if (j.code === 0 && j.data) {
+          const avail = parseFloat(j.data.available_balance || 0).toFixed(2);
+          const cash = parseFloat(j.data.cash_balance || 0).toFixed(2);
+          const voucher = parseFloat(j.data.voucher_balance || 0).toFixed(2);
+          const availTag = parseFloat(avail) > 0 ? '<span class="tag tag-green">可用</span>' : '<span class="tag tag-red">欠费</span>';
+          cards.push('<div class="card"><div class="provider-name">' + p.label + '</div><div class="provider-sub">' + host + ' · 按量付费</div>' +
+            '<div class="quota-row"><div><div class="label">可用余额（CNY）</div></div><div class="value" style="color:var(--green)">¥' + avail + '</div></div>' +
+            '<div class="quota-row"><div><div class="label">现金余额</div></div><div class="value">¥' + cash + '</div></div>' +
+            '<div class="quota-row" style="border:none"><div><div class="label">代金券余额</div></div><div class="value">¥' + voucher + '</div></div>' +
+            '<div class="quota-row" style="border:none"><div></div>' + availTag + '</div></div>');
+        } else if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
+        } else {
+          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+        }
+      } else if (p.quotaType === 'kimi_coding_plan') {
+        if (j.usage) {
+          const usage = j.usage;
+          const limits = [];
+          
+          // 5小时窗口（如果有）
+          if (j.limits && j.limits[0]) {
+            const lim = j.limits[0];
+            const d = lim.detail || {};
+            const l = parseInt(d.limit || 0);
+            const u = parseInt(d.used || 0);
+            const fpct = l > 0 ? Math.round(u / l * 100) : 0;
+            limits.push({
+              type: 'TOKENS_LIMIT',
+              unit: 3,
+              percentage: fpct,
+              nextResetTime: d.resetTime ? new Date(d.resetTime).getTime() : null
+            });
+          }
+          
+          // 周额度
+          const limit = parseInt(usage.limit || 0);
+          const used = parseInt(usage.used || 0);
+          const pct = limit > 0 ? Math.round(used / limit * 100) : 0;
+          limits.push({
+            type: 'TOKENS_LIMIT',
+            unit: 6,
+            percentage: pct,
+            nextResetTime: usage.resetTime ? new Date(usage.resetTime).getTime() : null
+          });
+          
+          cards.push(renderQuotaCard(p.label, host + ' · Coding Plan', limits));
+        } else if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
+        } else {
+          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+        }
+      }
+    }
+  } catch(e) {
+    cards.push(renderNoQuota('供应商额度', '', '获取失败: '+e.message));
+  }
+  document.getElementById('providerGrid').innerHTML = cards.join('');
+}
+
+let _allSessions = [];
+let _currentFilter = 'direct';
+let _categoryCounts = {};
+let _agentStatusMap = {}; // agentId → status info from /agent-status
+let _agentStatusNow = 0;  // /agent-status 返回的服务端 now（ms），用于模型时间戳相对时间
+
+function switchTab(btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  _currentFilter = btn.dataset.filter;
+  renderAgentCards();
+}
+
+async function fetchSessions() {
+  try {
+    const r = await fetch('/sessions-json');
+    const d = await r.json();
+    const all = d.sessions || [];
+
+    // 给每个 session 分类
+    for (const s of all) {
+      s._cat = classifySession(s);
+      s._ctxBase = s.contextTokens || 200000;
+      s._ctxUsed = s.totalTokens || 0;
+    }
+
+    // 按 agentId 找每个 agent 最新 direct session 的 ctx
+    const latestCtxByAgent = {};
+    for (const s of all) {
+      if (s._cat.id === 'direct') {
+        const aid = s.agentId;
+        if (!latestCtxByAgent[aid] || (s.ageMs != null && s.ageMs < latestCtxByAgent[aid].ageMs)) {
+          latestCtxByAgent[aid] = s;
+        }
+      }
+    }
+    for (const s of all) {
+      const ref = latestCtxByAgent[s.agentId];
+      if (ref && s.contextTokens === ref.contextTokens) {
+      } else if (ref) {
+        s._ctxBase = ref.contextTokens || 200000;
+      }
+    }
+
+    _allSessions = all;
+
+    // 统计各类别数量
+    _categoryCounts = {};
+    for (const cat of CATEGORY_RULES) {
+      _categoryCounts[cat.id] = all.filter(s => s._cat.id === cat.id).length;
+    }
+    _categoryCounts['other'] = all.filter(s => s._cat.id === 'other').length;
+    _categoryCounts['all'] = all.length;
+
+    // 更新 tab badges
+    for (const [id, count] of Object.entries(_categoryCounts)) {
+      const el = document.getElementById('badge-' + id);
+      if (el) el.textContent = count;
+    }
+
+    renderAgentCards();
+  } catch(e) {
+    document.getElementById('agentCardGrid').innerHTML = `<div class="error">获取失败: ${e.message}</div>`;
+  }
+}
+
+function renderAgentCards() {
+  let filtered = _allSessions;
+  if (_currentFilter !== 'all') {
+    filtered = _allSessions.filter(s => s._cat.id === _currentFilter);
+  }
+
+  document.getElementById('sessionCount').textContent = `${filtered.length} / ${_allSessions.length} session`;
+
+  let totalIn = 0, totalOut = 0;
+
+  // 按 agentId 去重，每个 agent 选最新活跃的 session
+  const agentLatest = {};
+  for (const s of filtered) {
+    const aid = s.agentId || 'unknown';
+    if (!agentLatest[aid] || (s.ageMs != null && s.ageMs < (agentLatest[aid].ageMs ?? Infinity))) {
+      agentLatest[aid] = s;
+    }
+  }
+  // 补全没有 session 的 agent
+  for (const aid of AGENT_ORDER) {
+    if (!agentLatest[aid]) agentLatest[aid] = null;
+  }
+
+  // 排序：working → waiting → idle，同状态内按最近活跃排
+  const statusOrder = {working: 0, waiting: 1, idle: 2, stale: 3};
+  const sorted = Object.keys(agentLatest).sort((a, b) => {
+    const sa = _agentStatusMap[a]?.status || 'idle';
+    const sb = _agentStatusMap[b]?.status || 'idle';
+    const diff = (statusOrder[sa] ?? 9) - (statusOrder[sb] ?? 9);
+    if (diff !== 0) return diff;
+    const aa = agentLatest[a]?.ageMs ?? Infinity;
+    const ab = agentLatest[b]?.ageMs ?? Infinity;
+    return aa - ab;
+  });
+
+  const statusIcon = {working:'<span class="spin-icon">🔨</span>', waiting:'⏳', idle:'😴', stale:'💤'};
+  const statusCls = {working:'agent-card-working', waiting:'agent-card-waiting', idle:'agent-card-idle', stale:'agent-card-idle'};
+  const statusText = {working:'工作中', waiting:'等待中', idle:'空闲', stale:'沉睡'};
+
+  let html = '';
+  let workingCount = 0;
+
+  for (const aid of sorted) {
+    const s = agentLatest[aid];
+    const stat = _agentStatusMap[aid] || {};
+    const st = stat.status || 'idle';
+    if (st === 'working') workingCount++;
+
+    const displayName = AGENT_NAMES[aid] || aid;
+    const emoji = AGENT_EMOJI[aid] || '🤖';
+    const subCount = stat.subagentCount || 0;
+    const age = stat.ageMs ? (stat.ageMs < 60000 ? Math.floor(stat.ageMs/1000)+'秒前' : stat.ageMs < 3600000 ? Math.floor(stat.ageMs/60000)+'分前' : Math.floor(stat.ageMs/3600000)+'时前') : '-';
+
+    if (!s) {
+      // 无活跃 session
+      html += `<div class="agent-card ${statusCls[st]||''}">
+        <div class="ac-header"><span class="ac-name">${emoji} ${displayName}</span><span class="ac-status-icon">${statusIcon[st]||'❓'}</span></div>
+        ${renderModelArea(stat) || `<div class="ac-row"><span class="ac-label">模型</span><span class="ac-val" style="color:var(--dim)">—</span></div>`}
+        <div class="ac-row"><span class="ac-label">活跃</span><span class="ac-val" style="color:var(--dim)">无活跃会话</span></div>
+        <div class="ac-row"><span class="ac-label">上下文</span><span class="ac-val" style="color:var(--dim)">—</span></div>
+        <div class="ac-ctx-bar"><div class="ac-ctx-fill" style="width:0%;background:var(--border)"></div></div>
+        ${subCount > 0 ? `<div class="ac-sub" style="color:var(--purple)">📎 ${subCount}个分身</div>` : ''}
+      </div>`;
+      continue;
+    }
+
+    const cp = s._ctxBase ? Math.round((s._ctxUsed / s._ctxBase) * 100) : 0;
+    const c = pctColor(cp);
+    const ptag = providerTag(s.modelProvider);
+    let kindBadge = '';
+    if (s._cat.badgeCls) {
+      kindBadge = `<span class="kind-badge ${s._cat.badgeCls}">${s._cat.label}</span>`;
+    }
+
+    html += `<div class="agent-card ${statusCls[st]||''}">
+      <div class="ac-header"><span class="ac-name">${emoji} ${displayName} ${kindBadge}</span><span class="ac-status-icon">${statusIcon[st]||'❓'} <span style="font-size:10px;color:var(--dim)">${age}</span></span></div>
+      ${renderModelArea(stat) || `<div class="ac-row"><span class="ac-label">模型</span><span class="ac-val">${s.model||'-'} ${ptag}</span></div>`}
+      <div class="ac-row"><span class="ac-label">输入/输出</span><span class="ac-val">↓${fmt(s.inputTokens||0)} ↑${fmt(s.outputTokens||0)}</span></div>
+      <div class="ac-row"><span class="ac-label">上下文</span><span class="ac-val">${cp}%</span></div>
+      <div class="ac-ctx-bar"><div class="ac-ctx-fill" style="width:${cp}%;background:${c}"></div></div>
+      ${subCount > 0 ? `<div class="ac-sub" style="color:var(--purple)">📎 ${subCount}个分身在跑</div>` : ''}
+    </div>`;
+    totalIn += s.inputTokens || 0;
+    totalOut += s.outputTokens || 0;
+  }
+  document.getElementById('agentCardGrid').innerHTML = html;
+  document.getElementById('agentStatusSummary').textContent = workingCount > 0 ? `🔧 ${workingCount}只虾在工作` : '全部空闲';
+
+  // 总览
+  document.getElementById('summaryGrid').innerHTML = [
+    {lbl:'员工总数', val:AGENT_ORDER.length},
+    {lbl:'总 Session', val:_allSessions.length},
+    {lbl:'主会话', val:(_categoryCounts.direct||0)},
+    {lbl:'子代理', val:(_categoryCounts.subagent||0)},
+    {lbl:'总输入 Token', val:fmt(totalIn)},
+    {lbl:'总输出 Token', val:fmt(totalOut)},
+  ].map(x=>`<div class="summary-card"><div class="val">${x.val}</div><div class="lbl">${x.lbl}</div></div>`).join('');
+}
+
+async function refresh() {
+  document.getElementById('lastUpdate').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+  await Promise.all([fetchProviderQuotas(), fetchSessions(), fetchCron(), fetchHealth(), fetchEmailStatus()]);
+}
+
+// ===== 系统健康模块 =====
+async function fetchHealth() {
+  try {
+    const r = await fetch('/health-json');
+    const d = await r.json();
+    
+    // CPU
+    const cpu = d.cpu_pct || 0;
+    const cpuEl = document.getElementById('hCpu');
+    cpuEl.textContent = cpu.toFixed(1) + '%';
+    cpuEl.style.color = cpu > 80 ? 'var(--red)' : cpu > 50 ? 'var(--yellow)' : 'var(--green)';
+    
+    // 内存
+    const memEl = document.getElementById('hMem');
+    memEl.innerHTML = d.mem_used_gb + '<small style="font-size:12px;color:var(--dim)">/' + d.mem_total_gb + 'GB</small>';
+    memEl.style.color = d.mem_pct > 90 ? 'var(--red)' : d.mem_pct > 75 ? 'var(--yellow)' : 'var(--green)';
+    
+    // Swap
+    const swapEl = document.getElementById('hSwap');
+    if (d.swap_used_m !== undefined) {
+      swapEl.innerHTML = d.swap_used_m.toFixed(0) + '<small style="font-size:11px;color:var(--dim)">MB</small>';
+      swapEl.style.color = d.swap_used_m > 8000 ? 'var(--red)' : d.swap_used_m > 4000 ? 'var(--yellow)' : 'var(--green)';
+    } else {
+      swapEl.textContent = '—';
+      swapEl.style.color = 'var(--dim)';
+    }
+    
+    // 磁盘
+    const diskEl = document.getElementById('hDisk');
+    diskEl.textContent = (d.disk_pct || '?') + '%';
+    diskEl.style.color = d.disk_pct > 90 ? 'var(--red)' : d.disk_pct > 80 ? 'var(--yellow)' : 'var(--green)';
+    
+    // 负载
+    const loadEl = document.getElementById('hLoad');
+    loadEl.innerHTML = d.load_1m + ' / ' + d.load_5m + ' / ' + d.load_15m;
+    const ncpu = d.cpu_cores || 4;
+    loadEl.style.color = d.load_1m > ncpu * 2 ? 'var(--red)' : d.load_1m > ncpu ? 'var(--yellow)' : 'var(--green)';
+    
+    // CDP Chrome
+    const cdpEl = document.getElementById('hCdp');
+    const warnEl = document.getElementById('cdpWarn');
+    if (d.cdp_renderers && d.cdp_renderers.length > 0) {
+      const maxCpu = Math.max(...d.cdp_renderers.map(x => x.cpu));
+      cdpEl.textContent = '\u26a0\ufe0f ' + maxCpu.toFixed(0) + '%';
+      cdpEl.style.color = maxCpu > 50 ? 'var(--red)' : 'var(--yellow)';
+      
+      let pages = d.cdp_pages ? d.cdp_pages.join(' \u00b7 ') : '';
+      warnEl.style.display = 'block';
+      warnEl.innerHTML = '\ud83d\udd34 CDP Chrome \u5b58\u5728\u9ad8CPU\u9875\u9762: ' + 
+        d.cdp_renderers.map(r => 'PID ' + r.pid + ' (' + r.cpu.toFixed(0) + '%)').join(', ') +
+        (pages ? '<br>\ud83d\udda5 \u6253\u5f00\u9875\u9762: ' + pages : '');
+    } else {
+      cdpEl.textContent = '\u2705 \u6b63\u5e38';
+      cdpEl.style.color = 'var(--green)';
+      warnEl.style.display = 'none';
+    }
+  } catch(e) {
+    console.error('fetchHealth:', e);
+  }
+}
+
+// ===== Cron 模块 =====
+const AGENT_CRON_NAMES = {main:'罗氏虾',jiweixia:'基围虾',caoxia:'草虾',pipixia:'皮皮虾',banjiexia:'斑节虾',duijiaoxia:'对焦虾',shanbei:'扇贝',hailuo:'海螺',xiaohexia:'小河虾',haixing:'海星',haima:'海马',yoooclaw:'YoooClaw'};
+
+function tsToTime(ms) {
+  if (!ms) return '-';
+  const d = new Date(ms);
+  return d.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+
+function humanPeriod(expr, tz) {
+  if (!expr) return '?';
+  const parts = expr.split(' ');
+  if (parts.length < 5) return expr;
+  const m = parts[0], h = parts[1], d = parts[2], mo = parts[3], dw = parts[4];
+  const days = ['日','一','二','三','四','五','六'];
+  if (d !== '*' && mo !== '*') return `每月${mo}日 ${h}:${m.padStart(2,'0')}`;
+  if (dw !== '*') return `周${days[parseInt(dw)]} ${h}:${m.padStart(2,'0')}`;
+  if (h.includes(',')) return h + ':' + m.padStart(2,'0');
+  if (h === '*') {
+    if (m.includes('*/')) return `每${m.split('/')[1]}分钟`;
+    return `每时${m}分`;
+  }
+  return `每天 ${h}:${m.padStart(2,'0')}`;
+}
+
+async function fetchCron() {
+  try {
+    const r = await fetch('/cron-json');
+    const d = await r.json();
+    document.getElementById('cronSubtitle').textContent = `${d.openclawCron.length} 个定时任务 · ${d.crontab.filter(c=>c.enabled).length} 条 crontab · ${d.launchAgents.length} 个系统服务`;
+
+    // OpenClaw Cron table
+    let html = '';
+    for (const j of d.openclawCron) {
+      const cls = j.consecutiveErrors >= 2 ? 'cron-row-error' : !j.enabled ? 'cron-row-disabled' : '';
+      let statusHtml;
+      if (j.lastRunStatus === 'ok') statusHtml = '<span class="cron-status-ok">✅</span>';
+      else if (j.lastRunStatus === 'error') statusHtml = '<span class="cron-status-error">❌ ' + (j.consecutiveErrors||0) + '次</span>';
+      else statusHtml = '<span class="cron-status-unknown">❓</span>';
+      html += `<tr class="${cls}">
+        <td><strong>${j.name}</strong></td>
+        <td><span style="font-size:11px;color:var(--dim)">${j.agentName||AGENT_CRON_NAMES[j.agentId]||j.agentId||'—'}</span></td>
+        <td style="font-size:11px;color:var(--dim);max-width:180px">${j.purpose||'—'}</td>
+        <td>${j.scheduleHuman||humanPeriod(j.schedule,j.tz)}</td>
+        <td>${tsToTime(j.lastRunAtMs)}</td>
+        <td>${statusHtml}</td>
+        <td>${tsToTime(j.nextRunAtMs)}</td>
+      </tr>`;
+    }
+    document.getElementById('cronOpenclawBody').innerHTML = html || '<tr><td colspan="7" class="empty-msg">无定时任务</td></tr>';
+
+    // Crontab table (合并后的，无注释行，调度中文，命令折叠)
+    html = '';
+    for (const c of d.crontab) {
+      if (!c.enabled) continue;
+      const purpose = c.purpose || '—';
+      const period = c.scheduleHuman || c.schedule;
+      const cmd = c.command || '';
+      const comment = c.comment || '';
+      const detail = comment ? `<div style="font-size:10px;color:var(--dim);margin-top:2px">${comment}</div>` : '';
+      html += `<tr>
+        <td>${purpose}${detail}</td>
+        <td>${period}</td>
+        <td style="font-size:11px;color:var(--dim)"><details><summary style="cursor:pointer;color:var(--dim);font-size:10px">展开</summary><code style="font-size:10px;word-break:break-all">${cmd}</code></details></td>
+      </tr>`;
+    }
+    document.getElementById('cronCrontabBody').innerHTML = html || '<tr><td colspan="3" class="empty-msg">无 crontab</td></tr>';
+
+    // LaunchAgent table
+    html = '';
+    for (const a of d.launchAgents) {
+      let statusHtml;
+      if (a.status === 'running') statusHtml = '<span style="color:var(--green)">● 运行中</span>';
+      else if (a.status === 'loaded') statusHtml = '<span style="color:var(--yellow)">◐ 已加载</span>';
+      else statusHtml = '<span style="color:var(--red)">○ 已停止</span>';
+      html += `<tr>
+        <td><strong>${a.name}</strong></td>
+        <td style="font-size:11px;color:var(--dim);max-width:200px">${a.purpose||'—'}</td>
+        <td style="font-size:12px">${a.runMode||'—'}</td>
+        <td>${a.runAtLoad ? '✅' : '—'}</td>
+        <td>${statusHtml}</td>
+      </tr>`;
+    }
+    document.getElementById('cronLaunchBody').innerHTML = html || '<tr><td colspan="4" class="empty-msg">无系统服务</td></tr>';
+
+    // Heartbeat table
+    const heartbeats = d.heartbeats || [];
+    const hbWrap = document.getElementById('heartbeatTableWrap');
+    if (heartbeats.length > 0) {
+      hbWrap.style.display = '';
+      let hbHtml = '';
+      for (const h of heartbeats) {
+        const statusHtml = h.enabled ? '<span class="cron-status-ok">● 启用</span>' : '<span class="cron-status-unknown">○ 关闭</span>';
+        hbHtml += `<tr>
+          <td><strong>${h.agentName||h.agentId}</strong></td>
+          <td>${h.every||'?'}</td>
+          <td>${h.target||'none'}</td>
+          <td>${statusHtml}</td>
+        </tr>`;
+      }
+      document.getElementById('heartbeatBody').innerHTML = hbHtml;
+    }
+  } catch(e) {
+    document.getElementById('cronSubtitle').textContent = '获取失败: ' + e.message;
+  }
+}
+
+async function fetchAgentStatus() {
+  try {
+    const r = await fetch('/agent-status');
+    const d = await r.json();
+    if (d.error) { console.error('fetchAgentStatus:', d.error); return; }
+    _agentStatusMap = {};
+    _agentStatusNow = d.now || Date.now();
+    for (const a of d.agents) {
+      _agentStatusMap[a.agentId] = a;
+    }
+    renderAgentCards();
+    // 渲染 Gateway 健康卡片
+    const gh = d.gatewayHealth;
+    const ghBox = document.getElementById('gatewayHealthBox');
+    if (ghBox && gh) {
+      const rssColor = gh.rssMB > 1500 ? 'var(--red)' : gh.rssMB > 1000 ? 'var(--yellow)' : 'var(--green)';
+      const upColor = gh.uptimeHours > 48 ? 'var(--yellow)' : 'var(--fg)';
+      ghBox.innerHTML = [
+        `<span>📊 RSS: <b style="color:${rssColor}">${gh.rssMB ? gh.rssMB+'MB' : '-'}</b></span>`,
+        `<span>⏱ 运行: <b style="color:${upColor}">${gh.uptimeHours ? gh.uptimeHours+'h' : '-'}</b></span>`,
+        `<span>🔄 重启: <b style="color:var(--blue)">${gh.nextRestartIn || '-'}</b> 后</span>`,
+        `<span>_PID: ${gh.pid || '-'}</span>`,
+      ].join('');
+    }
+    // 渲染 Hermes 健康卡片（2026-08-18 新增：hermes 网关 + 心跳 + watchdog 监测）
+    const hm = d.hermesHealth;
+    const hmBox = document.getElementById('hermesHealthBox');
+    if (hmBox && hm) {
+      const runColor = hm.running ? 'var(--green)' : 'var(--red)';
+      const runText = hm.running ? `运行中 (${hm.uptimeHours !== null ? hm.uptimeHours + 'h' : 'PID ' + hm.pid})` : '❌ 未运行';
+      const hbColor = hm.hbFresh ? 'var(--green)' : 'var(--red)';
+      const hbText = hm.hbAgeSec !== null ? (hm.hbFresh ? `${hm.hbAgeSec}s` : `${hm.hbAgeSec}s ⚠️假死`) : '无心跳文件';
+      const wdText = hm.watchdogTriggered ? `⚠️ ${mEsc(hm.watchdogLast)}` : '未触发';
+      hmBox.innerHTML = [
+        `<span>🟢 状态: <b style="color:${runColor}">${runText}</b></span>`,
+        `<span>💓 心跳: <b style="color:${hbColor}">${hbText}</b></span>`,
+        `<span>🐕 watchdog: ${wdText}</span>`,
+        hm.note ? `<span style="color:var(--yellow)">${hm.note}</span>` : '',
+      ].filter(Boolean).join('');
+    }
+    // 更新状态刷新时间戳，让用户看到页面在实时刷新
+    const el = document.getElementById('statusUpdate');
+    if (el) el.textContent = '状态更新于 ' + new Date().toLocaleTimeString('zh-CN');
+  } catch(e) { console.error('fetchAgentStatus:', e); }
+}
+
+// ===== 邮箱监控模块 =====
+async function fetchEmailStatus() {
+  try {
+    const r = await fetch('/email-status');
+    const d = await r.json();
+    const card = document.getElementById('emailCard');
+    const summary = document.getElementById('emailSummary');
+
+    if (d.error) {
+      card.innerHTML = '<div class="error">⚠️ ' + d.error + '</div>';
+      summary.textContent = '';
+      return;
+    }
+
+    const unread = d.unread_count || 0;
+    const todayCount = d.today_count || 0;
+    const newCount = d.new_count || 0;
+    const lastCheck = d.last_check ? new Date(d.last_check).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai', month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '未知';
+
+    // 摘要
+    if (unread === 0 && todayCount === 0) {
+      summary.textContent = '今日无邮件 · ' + lastCheck;
+      summary.style.color = 'var(--green)';
+    } else if (todayCount > 0) {
+      summary.textContent = '📥今日' + todayCount + '封 · 未读' + unread + '封 · ' + lastCheck;
+      summary.style.color = 'var(--blue)';
+    } else {
+      summary.textContent = unread + '封未读 · ' + lastCheck;
+      summary.style.color = 'var(--dim)';
+    }
+
+    // 卡片内容：两个维度（今日收到 / 未读）
+    let html = '<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">';
+    html += '<div style="text-align:center;min-width:80px"><div class="val" style="font-size:24px;font-weight:700;color:' + (todayCount > 0 ? 'var(--blue)' : 'var(--dim)') + '">' + todayCount + '</div><div class="lbl" style="font-size:11px;color:var(--dim)">今日收到</div></div>';
+    html += '<div style="text-align:center;min-width:80px"><div class="val" style="font-size:24px;font-weight:700;color:' + (unread > 0 ? 'var(--orange)' : 'var(--green)') + '">' + unread + '</div><div class="lbl" style="font-size:11px;color:var(--dim)">未读邮件</div></div>';
+
+    if (newCount > 0) {
+      html += '<div style="text-align:center;min-width:80px"><div class="val" style="font-size:24px;font-weight:700;color:var(--blue)">' + newCount + '</div><div class="lbl" style="font-size:11px;color:var(--dim)">本次新到</div></div>';
+    }
+
+    const recent = d.recent_new || [];
+    if (recent.length > 0) {
+      html += '<div style="flex:1;min-width:200px"><div style="font-size:12px;color:var(--dim);margin-bottom:4px">最新邮件：</div>';
+      for (const m of recent.slice(0, 3)) {
+        html += '<div style="font-size:12px;padding:2px 0"><span style="color:var(--text);font-weight:600">' + mEsc(m.from) + '</span> — <span style="color:var(--dim)">' + mEsc(m.subject) + '</span></div>';
+      }
+      html += '</div>';
+    } else if (d.note) {
+      html += '<div style="flex:1;font-size:12px;color:var(--dim)">' + mEsc(d.note) + '</div>';
+    }
+
+    html += '</div>';
+    card.innerHTML = html;
+  } catch (e) {
+    document.getElementById('emailCard').innerHTML = '<div class="error">⚠️ 邮件状态获取失败</div>';
+  }
+}
+
+// ===== 系统任务栏模块（2026-08-20）=====
+// 非Gateway衍生的定时任务进程（cron/launchd活动，零token）。仅看板可见，不进TG推送。
+function fmtDur(sec) {
+  if (sec == null) return '?';
+  if (sec < 60) return sec + '秒';
+  if (sec < 3600) return Math.floor(sec/60) + '分' + (sec%60) + '秒';
+  return Math.floor(sec/3600) + '时' + Math.floor((sec%3600)/60) + '分';
+}
+async function fetchSystemTasks() {
+  try {
+    const r = await fetch('/system-tasks');
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    const card = document.getElementById('systemTaskCard');
+    const summary = document.getElementById('systemTaskSummary');
+    const tasks = d.tasks || [];
+    const unknown = d.unknown || [];
+    let runningCount = 0;
+    let html = '';
+    for (const t of tasks) {
+      if (t.running) {
+        runningCount++;
+        html += `<div class="quota-row" title="${mEsc(t.owner)} · ${mEsc(t.period)} · ${t.procCount||1}个进程">
+          <div class="main-col"><div class="label" style="color:var(--text);font-weight:600">● ${mEsc(t.name)} <span style="color:var(--dim);font-weight:normal;font-size:11px">${mEsc(t.owner)} · ${mEsc(t.period)}</span></div></div>
+          <div style="font-size:12px;color:var(--green);font-weight:600">已跑 ${fmtDur(t.elapsedSec)}</div>
+        </div>`;
+      } else {
+        const last = t.last;
+        let lastStr;
+        if (last && last.time) {
+          const exitTag = last.exit === 'normal' ? '<span style="color:var(--green)">正常</span>' : '<span style="color:var(--yellow)">' + mEsc(last.exit) + '</span>';
+          lastStr = `最近一次 <span style="color:var(--text)">${mEsc(last.time)}</span> · ${fmtDur(last.durationSec)} · ${exitTag}`;
+        } else {
+          lastStr = '<span style="color:var(--dim)">暂无运行记录</span>';
+        }
+        html += `<div class="quota-row" title="${mEsc(t.owner)} · ${mEsc(t.period)}">
+          <div class="main-col"><div class="label" style="color:var(--dim)">○ ${mEsc(t.name)} <span style="font-size:11px">${mEsc(t.owner)} · ${mEsc(t.period)}</span></div></div>
+          <div style="font-size:11px;color:var(--dim)">${lastStr}</div>
+        </div>`;
+      }
+    }
+    for (const u of unknown) {
+      html += `<div class="quota-row" title="PID ${u.pid} · ${mEsc(u.cmdSummary)}">
+        <div class="main-col"><div class="label" style="color:var(--yellow)">❓ 未识别进程 <span style="font-size:11px;color:var(--dim)">${mEsc(u.cmdSummary)}</span></div></div>
+        <div style="font-size:12px;color:var(--yellow)">已跑 ${fmtDur(u.elapsedSec)}</div>
+      </div>`;
+    }
+    card.innerHTML = html || '<div class="empty-msg">无系统任务</div>';
+    summary.textContent = runningCount > 0 ? `▶ ${runningCount}个运行中` : '空闲';
+    summary.style.color = runningCount > 0 ? 'var(--green)' : 'var(--dim)';
+  } catch(e) {
+    const card = document.getElementById('systemTaskCard');
+    if (card) card.innerHTML = '<div class="error">系统任务获取失败: ' + e.message + '</div>';
+  }
+}
+
+fetchAgentStatus();
+setInterval(fetchAgentStatus, 15000);
+fetchSystemTasks();
+setInterval(fetchSystemTasks, 15000);
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+setInterval(fetchHealth, 30000);  // 系统健康每30秒刷新
+setInterval(fetchEmailStatus, 120000);  // 邮箱状态每2分钟刷新
+</script>
+</body>
+</html>
