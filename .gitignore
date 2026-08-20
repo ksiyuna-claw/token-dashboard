@@ -3,10 +3,11 @@ __pycache__/
 *.pyc
 token_snapshot.json
 data/
+tmp/
+archive/
 email_monitor.py
-02_*.md
-协作审核/
-变更日志.md
-产品说明书.md
-对焦虾*.md
-看板*.md
+
+# 备份/状态转储不入库（2026-08-20 落锚规整）
+*.bak
+*.bak.*
+task_state_*.json

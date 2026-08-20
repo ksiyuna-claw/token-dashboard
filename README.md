@@ -107,6 +107,19 @@ Kimi 有两套完全独立的 Key 体系，**不可混用**：
 - `openclaw` CLI（需在 PATH 中）
 - 访问海外 API 需配置 HTTP 代理
 
+## 外部服务清单
+
+详见 `docs/design/产品说明书.md` 中的「外部服务清单」章节。
+
+当前运行中的外部服务：
+- **聚光萤腾讯云服务器** `120.53.15.86` — H5落地页 + API + MongoDB（HTTP）
+- **聚光萤 GitHub CI/CD** — `juguangying-mini`（小程序前端）+ `juguangying-landing`（Flask落地页）
+- **聚光萤定时采集** — 全量采集(05:00) + RSS资讯采集(每小时)
+- **聚光萤健康监测** — 每30分钟远程检测，异常 TG 告警
+
+已下线：
+- ⚠️ `ai-film.crypto-signal.work`（2026-07-09 下线，迁至腾讯云）
+
 ## License
 
 MIT

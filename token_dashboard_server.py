@@ -1,6 +1,193 @@
 #!/usr/bin/env python3
 """虾厂 Token 看板 HTTP 服务"""
-import http.server, json, subprocess, os, time, urllib.request, urllib.error, threading, uuid, logging, logging.handlers, gc, resource
+import http.server, json, subprocess, os, time, urllib.request, urllib.error, threading, uuid, logging, logging.handlers, gc, resource, functools, plistlib, hmac, hashlib, base64
+
+# ── Auth 配置（JWT 无状态认证）─────────
+_AUTH_ENV_PATH = os.path.join(os.path.expanduser('~'), '.openclaw/workspace/ai_workspace/projects/2026-06-04-量化信息看板/.env')
+_AUTH_USER = 'kuangsiyu'
+_AUTH_PASS = ''
+_SESSION_MAX_AGE = 30 * 24 * 3600  # 30天（秒）
+_JWT_SECRET = None  # JWT签名密钥，延迟初始化
+_login_attempts = {}  # ip -> [timestamps] 登录频率限制
+_login_attempts_lock = threading.Lock()
+_LOGIN_MAX_ATTEMPTS = 5  # 60秒内最多5次
+_LOGIN_WINDOW = 60  # 60秒窗口
+
+# ── 通用缓存装饰器（P0 优化）──────────────────────────
+def cached(ttl_seconds):
+    """通用缓存装饰器，线程安全。被装饰函数返回的数据缓存ttl_seconds秒。"""
+    _store = {}
+    _lock = threading.Lock()
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = str(args) + str(sorted(kwargs.items()))
+            now = time.time()
+            with _lock:
+                c = _store.get(key)
+                if c and now - c[0] < ttl_seconds:
+                    return c[1]
+            result = fn(*args, **kwargs)
+            with _lock:
+                _store[key] = (now, result)
+            return result
+        return wrapper
+    return decorator
+
+# ── CORS 白名单（P1 安全）──────────────────────────────
+_ALLOWED_ORIGINS = {'http://127.0.0.1:18888', 'https://token-dashboard.crypto-signal.work'}
+def _cors_origin(handler):
+    origin = handler.headers.get('Origin', '')
+    return origin if origin in _ALLOWED_ORIGINS else 'http://127.0.0.1:18888'
+
+# ── Quota 缓存（P0，超时fallback用）────────────────────
+_quota_cache = {}  # {provider_id: (timestamp, data)}
+_quota_cache_lock = threading.Lock()
+_QUOTA_CACHE_TTL = 60  # 60秒
+
+def _load_auth_password():
+    """从量化看板 .env 读取 DASHBOARD_PASSWORD"""
+    global _AUTH_PASS
+    try:
+        with open(_AUTH_ENV_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('DASHBOARD_PASSWORD='):
+                    _AUTH_PASS = line.split('=', 1)[1].strip()
+                    break
+    except Exception as e:
+        logging.warning(f'[AUTH] 读取密码失败: {e}')
+
+_load_auth_password()
+
+# ── JWT 无状态认证工具函数 ────────────────────────────
+def _get_jwt_secret():
+    """延迟初始化JWT密钥，基于认证密码派生"""
+    global _JWT_SECRET
+    if _JWT_SECRET is None:
+        if _AUTH_PASS:
+            _JWT_SECRET = _AUTH_PASS.encode('utf-8')
+        else:
+            _JWT_SECRET = b'token-dashboard-fallback-secret'
+    return _JWT_SECRET
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode('utf-8')
+
+def _b64url_decode(s: str) -> bytes:
+    padding = 4 - len(s) % 4
+    if padding != 4:
+        s += '=' * padding
+    return base64.urlsafe_b64decode(s)
+
+def _jwt_create(user: str, expires_in: int = 30 * 24 * 3600) -> str:
+    """生成JWT token"""
+    header = _b64url_encode(b'{"alg":"HS256","typ":"JWT"}')
+    payload_dict = {'user': user, 'exp': int(time.time()) + expires_in}
+    payload = _b64url_encode(json.dumps(payload_dict).encode('utf-8'))
+    signing_input = f'{header}.{payload}'.encode('utf-8')
+    signature = hmac.new(_get_jwt_secret(), signing_input, hashlib.sha256).digest()
+    sig_b64 = _b64url_encode(signature)
+    return f'{header}.{payload}.{sig_b64}'
+
+def _jwt_verify(token: str) -> bool:
+    """验证JWT token：签名正确 + 未过期。返回True表示有效。"""
+    if not token or token.count('.') != 2:
+        return False
+    try:
+        header, payload, sig = token.split('.')
+        signing_input = f'{header}.{payload}'.encode('utf-8')
+        expected_sig = hmac.new(_get_jwt_secret(), signing_input, hashlib.sha256).digest()
+        provided_sig = _b64url_decode(sig)
+        if not hmac.compare_digest(expected_sig, provided_sig):
+            return False
+        payload_dict = json.loads(_b64url_decode(payload))
+        if payload_dict.get('exp', 0) <= time.time():
+            return False
+        return True
+    except Exception:
+        return False
+
+def _check_login_rate_limit(client_ip):
+    """检查登录频率，返回True表示允许尝试"""
+    now = time.time()
+    with _login_attempts_lock:
+        attempts = _login_attempts.get(client_ip, [])
+        # 清理60秒外的记录
+        attempts = [t for t in attempts if now - t < _LOGIN_WINDOW]
+        if len(attempts) >= _LOGIN_MAX_ATTEMPTS:
+            _login_attempts[client_ip] = attempts
+            return False
+        attempts.append(now)
+        _login_attempts[client_ip] = attempts
+        return True
+
+def _create_session(user):
+    """创建JWT token（无状态，服务器不需要存储）"""
+    return _jwt_create(user, _SESSION_MAX_AGE)
+
+def _check_session(handler):
+    """检查Cookie中的JWT token，返回True表示已登录"""
+    cookie_header = handler.headers.get('Cookie', '')
+    if not cookie_header:
+        return False
+    for part in cookie_header.split(';'):
+        part = part.strip()
+        if part.startswith('td_session='):
+            token = part[len('td_session='):]
+            return _jwt_verify(token)
+    return False
+
+# Basic Auth 已移除（用户反馈体验差），统一用 Cookie Session Auth
+
+_LOGIN_HTML = '''<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🦐 Token 看板登录</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;display:flex;justify-content:center;align-items:center;min-height:100vh}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;width:320px}
+.card h1{font-size:20px;margin-bottom:4px}
+.card .sub{font-size:13px;color:#8b949e;margin-bottom:24px}
+.field{margin-bottom:16px}
+.field label{display:block;font-size:13px;color:#8b949e;margin-bottom:6px}
+.field input{width:100%;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e6edf3;font-size:14px}
+.field input:focus{outline:none;border-color:#58a6ff}
+.btn{width:100%;padding:10px;background:#238636;border:1px solid #238636;border-radius:6px;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+.btn:hover{background:#2ea043}
+.err{color:#f85149;font-size:13px;margin-top:12px;text-align:center}
+.remember{margin-bottom:16px}
+.remember label{display:flex;align-items:center;gap:6px;font-size:13px;color:#8b949e;cursor:pointer}
+.remember input{width:auto}
+</style></head>
+<body><div class="card">
+<h1>🦐 Token 看板</h1>
+<div class="sub">请登录</div>
+<form method="POST" action="/login">
+<div class="field"><label>用户名</label><input type="text" name="username" autofocus></div>
+<div class="field"><label>密码</label><input type="password" name="password"></div>
+<div class="remember"><label><input type="checkbox" name="remember" value="1" checked> 记住我（30天免登录）</label></div>
+<button type="submit" class="btn">登录</button>
+</form>
+</div></body></html>'''
+
+def _send_login_page(handler):
+    """发送登录页面"""
+    body = _LOGIN_HTML.encode('utf-8')
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'text/html; charset=utf-8')
+    handler.send_header('Content-Length', len(body))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+def _send_auth_challenge(handler):
+    """未登录时跳转到登录页"""
+    handler.send_response(302)
+    handler.send_header('Location', '/login')
+    handler.send_header('Content-Type', 'text/plain')
+    handler.end_headers()
+
 
 # 🔴 内存泄漏防护 (2026-06-24): 50分钟 RSS 2GB，LRU 没拦住，加硬防线
 _MEM_WATCH_INTERVAL = 60  # 秒
@@ -87,7 +274,8 @@ PROVIDER_QUOTA_API = {
     'open.bigmodel.cn': ('https://open.bigmodel.cn/api/monitor/usage/quota/limit', 'zhipu_quota'),
     'api.z.ai': ('https://api.z.ai/api/monitor/usage/quota/limit', 'zhipu_quota'),
     'api.deepseek.com': ('https://api.deepseek.com/user/balance', 'deepseek_balance'),
-    'api.minimaxi.com': ('https://api.minimaxi.com/v1/token_plan/remains', 'minimax_quota'),
+    # 2026-07-23 MiniMax套餐到期下线，代码保留备用
+    # 'api.minimaxi.com': ('https://api.minimaxi.com/v1/token_plan/remains', 'minimax_quota'),
     'api.moonshot.cn': ('https://api.moonshot.cn/v1/users/me/balance', 'kimi_balance'),
     'api.kimi.com': ('https://api.kimi.com/coding/v1/usages', 'kimi_coding_plan'),
     # dashscope（阿里云百炼）是语音/声图模型（ASR/TTS/文生图），非 LLM 文本生成，
@@ -99,9 +287,21 @@ PROVIDER_LABELS = {
     'zhipu': '智谱 BigModel（国内）',
     'zai': '智谱 BigModel（海外）',
     'deepseek': 'DeepSeek',
-    'minimax': 'MiniMax（编程套餐）',
+    # 2026-07-23 MiniMax套餐到期下线，代码保留备用
+    # 'minimax': 'MiniMax（编程套餐）',
     'kimi': 'Kimi（Moonshot）',
 }
+
+# ── 看板隐藏的 provider（2026-08-14 匡书记批准：方案A改良版）──────────────
+# zai（智谱海外）：Coding Plan 已于 2026-08-07 到期未续费。2026-08-14 基围虾用
+# `openclaw onboard --auth-choice zai-coding-cn` 重写 openclaw.json 的 zai provider，
+# 实际挂的是国内端点 open.bigmodel.cn + 国内 Key（与 zhipu 完全同 Key 同端点同额度接口）。
+# openclaw.json 的 zai 是全厂 default 模型 zai/glm-5.2 的路由依赖，绝不能删；
+# 因此在看板侧隐藏：zai 不进 /providers 响应 → 前端无卡片、服务端不为其发起
+# 任何额度查询/缓存（省掉与 zhipu 卡完全重复的额度 API 调用，纯浪费带宽）。
+# 🔄 恢复方法：从下面集合中移除 'zai' 即可（代码保留以防万一，
+#    PROVIDER_QUOTA_API / PROVIDER_LABELS 的 zai 条目均未动）。
+HIDDEN_PROVIDERS = {'zai'}
 
 # 从 transcript 读实际调用模型（session 元数据的 model 是配置值，不准）
 AGENTS_DIR = os.path.join(os.path.expanduser('~'), '.openclaw/agents')
@@ -139,20 +339,56 @@ def _parse_msg_ts(obj, msg):
     return None
 
 def _read_session_transcript(session_id, agent_id):
-    """读单个 session transcript 的 assistant 消息，返回 [(model, provider, ts), ...]"""
-    tdir = os.path.join(AGENTS_DIR, agent_id, 'sessions')
+    """读单个 session transcript 的 assistant 消息，返回 [(model, provider, ts), ...]
+    优先读 agent sqlite（beta.3+），fallback 读旧 .jsonl 文件。
+    """
     seq = []
+    # --- Phase 1: 读 sqlite transcript_events（beta.3+） ---
+    db_path = os.path.join(AGENTS_DIR, agent_id, 'agent', 'openclaw-agent.sqlite')
+    try:
+        if os.path.isfile(db_path):
+            import sqlite3
+            conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            try:
+                cur = conn.execute(
+                    'SELECT event_json FROM transcript_events WHERE session_id = ? ORDER BY seq DESC LIMIT 30',
+                    (session_id,)
+                )
+                rows = list(cur)
+                rows.reverse()  # 恢复时间正序
+                for (event_json,) in rows:
+                    try:
+                        obj = json.loads(event_json)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    msg = obj.get('message', {})
+                    if msg.get('role') == 'assistant' and msg.get('model'):
+                        m = msg['model']
+                        if m in ('delivery-mirror', 'gateway', 'gateway-injected'):
+                            continue
+                        seq.append((m, msg.get('provider', ''), _parse_msg_ts(obj, msg)))
+            finally:
+                conn.close()
+            if seq:
+                return seq  # sqlite 有数据，直接返回
+    except Exception:
+        pass
+    # --- Phase 2: fallback 读旧 .jsonl 文件（兼容旧数据） ---
+    tdir = os.path.join(AGENTS_DIR, agent_id, 'sessions')
     try:
         if os.path.isdir(tdir):
-            primary, archive = [], []
+            primary, archive, bak = [], [], []
             for fn in os.listdir(tdir):
                 if fn.startswith(session_id) and fn.endswith('.jsonl') and 'trajectory' not in fn:
                     primary.append(os.path.join(tdir, fn))
                 elif fn.startswith(session_id) and '.jsonl.reset.' in fn:
                     archive.append(os.path.join(tdir, fn))
+                elif fn.startswith(session_id) and '.jsonl.bak-' in fn:
+                    bak.append(os.path.join(tdir, fn))
             primary.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             archive.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-            candidates = primary or archive
+            bak.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            candidates = primary or archive or bak
             if candidates:
                 with open(candidates[0]) as f:
                     for line in f:
@@ -166,7 +402,7 @@ def _read_session_transcript(session_id, agent_id):
                         msg = obj.get('message', {})
                         if msg.get('role') == 'assistant' and msg.get('model'):
                             m = msg['model']
-                            if m in ('delivery-mirror', 'gateway'):
+                            if m in ('delivery-mirror', 'gateway', 'gateway-injected'):
                                 continue
                             seq.append((m, msg.get('provider', ''), _parse_msg_ts(obj, msg)))
     except Exception:
@@ -292,6 +528,9 @@ def _get_providers():
         auth_keys = _load_auth_keys()
         result = []
         for pid, p in providers_cfg.items():
+            # 隐藏的 provider：不展示卡片、不发额度查询（原因见 HIDDEN_PROVIDERS 注释）
+            if pid in HIDDEN_PROVIDERS:
+                continue
             base_url = p.get('baseUrl', '')
             # apiKey 优先从 openclaw.json 读，fallback 到 auth-profiles.json
             api_key = p.get('apiKey', '') or auth_keys.get(pid, '')
@@ -363,6 +602,7 @@ CRONTAB_PURPOSE = {
     # 保留结构供将来扩展，/cron 端点通过 _get_crontab() 的 if/elif 匹配
 }
 
+@cached(30)
 def _get_system_health():
     """获取系统健康指标（CPU、内存、CDP Chrome）"""
     result = {'ts': time.time()}
@@ -457,13 +697,15 @@ def _get_system_health():
 LAUNCH_PURPOSE = {
     'ai.openclaw.gateway': '虾厂核心 · OpenClaw Gateway 主进程',
     'ai.hermes.gateway': 'AI基础设施 · Hermes 知识映射 Gateway',
+    'ai.hermes.cleanup-locks': 'AI基础设施 · Hermes 开机锁文件清理（防 PID 复用导致误锁）',
     'com.openclaw.token-dashboard': '运维 · Token看板 HTTP服务 (18888)',
-    'com.openclaw.chrome-cdp': '虾厂工具 · CDP Chrome 调试浏览器 (18800)',
-    'com.openclaw.cloudflared': '量化看板 · Cloudflare Tunnel 外网穿透',
+    'com.openclaw.cloudflared': '运维 · Cloudflare Tunnel 外网穿透（token-dashboard.crypto-signal.work / quant-dashboard）',
     'com.openclaw.dashboard': '量化看板 · 看板 HTTP服务',
     'com.openclaw.guoxue-bot': '国学运势 · Telegram Bot 服务',
     'com.openclaw.ai-radar': '量化看板 · AI雷达信号服务',
+    'com.openclaw.kline-radar': '量化看板 · K线雷达服务（行情信号检测）',
     'com.openclaw.onchain-dashboard': '量化看板 · 链上数据看板服务',
+    'com.openclaw.joke-detector': 'AI实验 · 笑力检测仪服务（智谱API检测幽默内容）',
     'com.openclaw.managed-chrome': '虾厂工具 · CDP Chrome 调试浏览器 (18800)',
     'com.haixing.landing-page': 'AI影视 · 落地页 HTTP服务',
     'io.github.clash-verge-rev.clash-verge-rev': '网络 · Clash Verge 代理工具',
@@ -529,6 +771,54 @@ def merge_with_snapshot(current_data):
     save_snapshot(snap_data)
     return current_data
 
+
+def _refresh_updated_at_from_sqlite(data):
+    """issue-0183 修复：用 agent sqlite 的 sessions.updated_at 覆盖 CLI 的滞后 updatedAt。
+
+    根因（2026-08-15 实测验证）：
+    - `openclaw sessions --json` 对 subagent session 返回的 updatedAt ≈ spawn 观察时刻
+      （transcript_observed_at），子 session 运行期间不再刷新；
+    - Gateway 对 subagent run 不发 sessions.changed(hasActiveRun=True) 事件
+      （WS 日志 12:10:48→12:27:17 对 jiweixia 空白 16 分钟，但 sqlite transcript
+       12:10-12:31 持续有事件写入）；
+    - 双信号同时失明 → 看板把正在跑子任务的 agent 判成 waiting/idle。
+
+    sqlite sessions.updated_at 是真实写入时间（运行中实测 age<1s），按 session_key
+    精确对应后取 max 覆盖 CLI 值。会话彻底结束后 sqlite updated_at 停止前进，
+    不影响 idle/stale 判定。
+    """
+    try:
+        import sqlite3
+    except ImportError:
+        return data
+    per_agent_keys = {}
+    for s in data.get('sessions', []):
+        aid = s.get('agentId')
+        key = s.get('key', '')
+        if aid and key:
+            per_agent_keys.setdefault(aid, {})[key] = s
+    for aid, keymap in per_agent_keys.items():
+        db_path = os.path.join(AGENTS_DIR, aid, 'agent', 'openclaw-agent.sqlite')
+        if not os.path.isfile(db_path):
+            continue
+        try:
+            conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=5)
+            try:
+                # 可接受债务（issue-0183 对焦虾第2轮R2-1）：全表扫无 LIMIT/索引。sessions 为本地小表
+                # （仅元数据行，当前千行级），全表扫开销可忽略；若量级增长需加 LIMIT/索引。
+                rows = conn.execute('SELECT session_key, updated_at FROM sessions').fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            continue
+        for sk, upd in rows:
+            s = keymap.get(sk)
+            if s is None or not upd:
+                continue
+            if upd > s.get('updatedAt', 0):
+                s['updatedAt'] = upd
+    return data
+
 def _get_cached_sessions():
     """获取缓存的 sessions 数据，每15秒刷新一次。线程安全。"""
     now = time.time()
@@ -542,11 +832,13 @@ def _get_cached_sessions():
             capture_output=True, text=True, timeout=15
         )
         data = json.loads(r.stdout)
+        data = merge_with_snapshot(data)
+        data = _refresh_updated_at_from_sqlite(data)  # issue-0183：sqlite 真源覆盖 CLI 滞后 updatedAt
+        # R1修复：ageMs 必须在 sqlite 覆盖后计算，否则前端直接消费的 s.ageMs 仍是 CLI 滞后值
         now_ms = int(time.time() * 1000)
         for x in data.get('sessions', []):
             if 'updatedAt' in x:
                 x['ageMs'] = now_ms - x['updatedAt']
-        data = merge_with_snapshot(data)
         with _sessions_lock:
             _sessions_cache['data'] = data
             _sessions_cache['ts'] = now
@@ -591,7 +883,7 @@ def _ws_listener_loop():
 
         while True:  # 外层重连循环
             try:
-                async with websockets.connect(ws_url) as ws:
+                async with websockets.connect(ws_url, ping_interval=None, ping_timeout=None) as ws:
                     # 1. 接收 challenge nonce
                     msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
                     challenge = json.loads(msg)
@@ -653,10 +945,46 @@ def _ws_listener_loop():
                     _ws_connected = True
                     logging.info('[WS] connected and subscribed, listening for events...')
 
+                    # 重连后同步状态：以 Gateway 为准重建 active runs
+                    sync_id = str(uuid.uuid4())
+                    await ws.send(json.dumps({
+                        'type': 'req',
+                        'id': sync_id,
+                        'method': 'sessions.list',
+                        'params': {},
+                    }))
+                    while True:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                        data = json.loads(msg)
+                        if data.get('type') == 'res' and data.get('id') == sync_id:
+                            sessions = data.get('result', {}).get('sessions', [])
+                            _agent_active_runs.clear()
+                            _agent_ws_activity.clear()
+                            now_ms_sync = int(time.time() * 1000)
+                            for s in sessions:
+                                if s.get('hasActiveRun'):
+                                    sk = s.get('sessionKey', '')
+                                    aid = _parse_agent_id_from_session_key(sk) or s.get('agentId', '')
+                                    if aid:
+                                        _agent_active_runs[aid] = True
+                                        _agent_ws_activity[aid] = now_ms_sync
+                            logging.info(f'[WS] reconnect sync: {len(_agent_active_runs)} active agents')
+                            break
+                        # 跳过插队消息
+
                     # 4. 事件监听循环
                     while True:
+                        # --- WS 传输层：recv + json.loads ---
                         try:
                             msg = await asyncio.wait_for(ws.recv(), timeout=60.0)
+                        except asyncio.TimeoutError:
+                            continue
+                        except Exception as e:
+                            _log_ws_error(e)
+                            break  # WS 断开/死亡 → 让外层重连
+
+                        # --- 事件处理层：解析 + 更新状态 ---
+                        try:
                             data = json.loads(msg)
 
                             if data.get('type') != 'event':
@@ -681,11 +1009,12 @@ def _ws_listener_loop():
                                     if has_active_run:
                                         _agent_active_runs[agent_id] = True
                                         _agent_ws_activity[agent_id] = now_ms
-                                        logging.debug(f'[WS] sessions.changed → {agent_id} hasActiveRun=True')
+                                        logging.info(f'[WS] sessions.changed → {agent_id} hasActiveRun={has_active_run} (processed OK)')
                                     else:
-                                        # 模型 run 结束，清除活跃标记
+                                        # 模型 run 结束，清除活跃标记和 WS 活动时间戳
                                         _agent_active_runs.pop(agent_id, None)
-                                        logging.debug(f'[WS] sessions.changed → {agent_id} hasActiveRun=False')
+                                        _agent_ws_activity.pop(agent_id, None)
+                                        logging.info(f'[WS] sessions.changed → {agent_id} hasActiveRun={has_active_run} (processed OK)')
                                 continue
 
                             # 其他非 health 事件都尝试提取 agentId
@@ -699,11 +1028,9 @@ def _ws_listener_loop():
                             else:
                                 logging.debug(f'[WS] {evt} (no agentId)')
 
-                        except asyncio.TimeoutError:
-                            continue
                         except Exception as e:
                             _log_ws_error(e)
-                            break  # 🔴 2026-06-24 修复：continue 导致死循环（WS死亡后 ws.recv() 立即再抛异常），改为 break 让外层重连
+                            continue  # 跳过这条坏事件，继续监听下一条（不 break 重连）
 
             except Exception as e:
                 _ws_connected = False
@@ -776,10 +1103,24 @@ def _detect_active_process_agents():
                 for p in patterns:
                     if p in ll:
                         active.add(aid)
+        # CEO 的 workspace 是 workspace/（无后缀），需要单独匹配
+        # 注意：workspace-xxx 已经被上面的条件处理了，这里只匹配无后缀的 workspace/
+        for line in lines:
+            ll = line.lower()
+            if not any(kw in ll for kw in ['python3', 'node', 'ffmpeg', 'kling']):
+                continue
+            if 'token_dashboard' in ll or 'openclaw/dist/index.js' in ll:
+                continue
+            if 'simplehttp' in ll or 'http.server' in ll:
+                continue
+            # 匹配 CEO: workspace/ 后面跟 ai_workspace 或 projects 等，但不能是 workspace-
+            if '/.openclaw/workspace/' in ll and 'workspace-' not in ll:
+                active.add('main')
         return active
     except Exception:
         return set()
 
+@cached(60)
 def _get_openclaw_cron():
     """获取所有 agent 的 openclaw cron 汇总（并发遍历）"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -882,6 +1223,14 @@ def _cron_to_chinese(schedule):
         if '/' in minute:
             interval = minute.split('/')[1]
             return f"每{interval}分钟"
+        if ',' in minute:
+            # 逗号列表，如 "5,35" → 计算等间隔输出"每X分钟"
+            mins = [int(x) for x in minute.split(',') if x.isdigit()]
+            if len(mins) >= 2:
+                intervals = [mins[i+1] - mins[i] for i in range(len(mins)-1)]
+                if len(set(intervals)) == 1:
+                    return f"每{intervals[0]}分钟"
+            return f"每小时:{minute}分"
         if minute == '0':
             return "每小时整点"
         return f"每小时:{minute}分"
@@ -895,6 +1244,7 @@ def _cron_to_chinese(schedule):
     h = int(hour) if hour.isdigit() else hour
     return f"每天{h:02d}:{m:02d}"
 
+@cached(60)
 def _get_crontab():
     """获取系统 crontab，合并注释和任务行"""
     try:
@@ -957,6 +1307,10 @@ def _get_crontab():
                 purpose = '[Token看板] 邮件监听（新邮件推送TG）'
             elif 'gateway_restart' in full_cmd:
                 purpose = '[虾厂运维] Gateway 定时重启（每天04:00，释放V8堆碎片+session缓存）'
+            elif 'cloud_monitor' in full_cmd:
+                purpose = '[聚光萤] 云端服务监控（每30分钟，异常时TG告警）'
+            elif 'backup.sh' in full_cmd or 'zhitai' in full_cmd:
+                purpose = '[虾厂运维] 智泰硬盘全量备份（每天06:40，成功/失败TG推送）'
             # 找对应注释
             comment = ''
             for c in comments:
@@ -979,8 +1333,9 @@ def _get_crontab():
     except Exception as e:
         return [{'error': str(e)}]
 
+@cached(60)
 def _get_heartbeats():
-    """获取各虾的心跳配置"""
+    """获取各虾的心跳配置（含已关闭的，用于看板完整展示）"""
     try:
         r = subprocess.run(
             ['openclaw', 'config', 'get', 'agents', '--json'],
@@ -1002,31 +1357,25 @@ def _get_heartbeats():
                 # 可能是 {defaults:..., list:[...]}
                 agents = data.get('list', [])
 
-        AGENT_NAMES = {
-            'main': '罗氏虾', 'jiweixia': '基围虾', 'caoxia': '草虾',
-            'duijiaoxia': '对焦虾', 'pipixia': '皮皮虾', 'xiaohexia': '小河虾',
-            'banjiexia': '斑节虾', 'shanbei': '扇贝', 'hailuo': '海螺',
-            'haixing': '海星', 'haima': '海马', 'yoooclaw': 'YoooClaw',
-        }
-
         result = []
         for a in agents:
             aid = a.get('id', a.get('agentId', ''))
             hb = a.get('heartbeat', {})
             every = hb.get('every', '0m')
-            if not every or every == '0m' or every == '0':
-                continue  # 心跳关闭的跳过
+            # 0m/0 = 心跳关闭，但仍展示以便看板完整呈现所有虾的状态
+            is_enabled = every and every not in ('0m', '0', '', '0min', '0minutes')
             result.append({
                 'agentId': aid,
                 'agentName': AGENT_NAMES.get(aid, aid),
-                'every': every,
+                'every': every if every and every not in ('0m', '0', '') else '已关闭',
                 'target': hb.get('target', 'none'),
-                'enabled': hb.get('enabled', True) is not False,
+                'enabled': is_enabled,
             })
         return result
     except Exception as e:
         return [{'error': str(e)}]
 
+@cached(60)
 def _get_launch_agents():
     """获取 LaunchAgent 服务信息"""
     agents = []
@@ -1052,27 +1401,22 @@ def _get_launch_agents():
     for pf in plist_files:
         info = {'plist': os.path.basename(pf)}
         try:
-            # 读取 Label
-            r = subprocess.run(['/usr/libexec/PlistBuddy', '-c', 'Print :Label', pf],
-                               capture_output=True, text=True, timeout=3)
-            label = r.stdout.strip()
+            with open(pf, 'rb') as f:
+                pl = plistlib.load(f)
+            label = pl.get('Label', '')
             info['name'] = label
             info['type'] = 'LaunchAgent'
 
             # StartInterval
-            r = subprocess.run(['/usr/libexec/PlistBuddy', '-c', 'Print :StartInterval', pf],
-                               capture_output=True, text=True, timeout=3)
-            info['interval'] = int(r.stdout.strip()) if r.returncode == 0 else None
+            interval = pl.get('StartInterval')
+            info['interval'] = int(interval) if interval else None
 
             # RunAtLoad
-            r = subprocess.run(['/usr/libexec/PlistBuddy', '-c', 'Print :RunAtLoad', pf],
-                               capture_output=True, text=True, timeout=3)
-            info['runAtLoad'] = r.stdout.strip().lower() == 'true' if r.returncode == 0 else None
+            info['runAtLoad'] = pl.get('RunAtLoad')
 
             # KeepAlive
-            r = subprocess.run(['/usr/libexec/PlistBuddy', '-c', 'Print :KeepAlive', pf],
-                               capture_output=True, text=True, timeout=3)
-            info['keepAlive'] = r.stdout.strip().lower() == 'true' if r.returncode == 0 else None
+            ka = pl.get('KeepAlive')
+            info['keepAlive'] = bool(ka) if ka is not None else None
 
             # 用途
             info['purpose'] = LAUNCH_PURPOSE.get(label, '')
@@ -1108,44 +1452,166 @@ def _get_launch_agents():
 
 
 class H(http.server.SimpleHTTPRequestHandler):
+    # protocol_version = "HTTP/1.1"  # 回滚：Python http.server 的 HTTP/1.1 实现导致线程耗尽，所有请求超时
+
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=DIR, **kw)
 
-    def _proxy_quota(self, api_url, api_key):
-        """代理请求额度 API，返回 JSON 给浏览器"""
+    def handle_one_request(self):
+        """重写父类方法：统一捕获 BrokenPipe/ConnectionReset/ConnectionAborted。
+        cloudflared 超时断开后，Python server 写响应会抛这些异常，
+        不捕获会导致线程崩溃+stderr刷屏。静默处理即可。"""
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # 客户端（cloudflared）已断开，无法发送响应——静默丢弃
+            try:
+                self.close_connection = True
+            except Exception:
+                pass
+
+    def _send_json(self, status, data, extra_headers=None):
+        """安全发送 JSON 响应。如果客户端已断开（BrokenPipe/ConnectionReset），静默处理。"""
+        try:
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
+            if extra_headers:
+                for k, v in extra_headers.items():
+                    self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # 客户端（cloudflared）已断开，无法发送——静默丢弃
+            logging.debug('client disconnected before response (provider may have been slow)')
+
+    def _proxy_quota(self, api_url, api_key, provider_id):
+        """代理请求额度 API，返回 JSON 给浏览器。带缓存+超时fallback。"""
+        # 1. 查缓存（TTL 内直接返回；过期后仍保留旧缓存用于 fallback）
+        now = time.time()
+        with _quota_cache_lock:
+            c = _quota_cache.get(provider_id)
+            if c and now - c[0] < _QUOTA_CACHE_TTL:
+                self._send_json(200, c[1])
+                return
+            stale_cache = c  # 过期缓存也留着，超时时 fallback 用
+
+        # 2. 调上游API（超时 10 秒，原 5 秒太短导致 kimi/智谱偶尔超时）
         try:
             headers = {'Authorization': 'Bearer ' + api_key}
             # Kimi Coding Plan 需要特殊 User-Agent
             if 'kimi.com/coding' in api_url:
                 headers['User-Agent'] = 'KimiCLI/1.6'
             req = urllib.request.Request(api_url, headers=headers)
-            if 'z.ai' in api_url or 'deepseek' in api_url or 'minimaxi' in api_url or 'moonshot' in api_url or 'kimi.com' in api_url:
+            # 2026-07-23 MiniMax套餐到期下线，去掉 'minimaxi' in api_url 条件（代码保留备用）
+            if 'z.ai' in api_url or 'deepseek' in api_url or 'moonshot' in api_url or 'kimi.com' in api_url:
                 with _PROXY_OPENER.open(req, timeout=10) as resp:
                     data = json.loads(resp.read())
             else:
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = json.loads(resp.read())
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps(data).encode())
+            # 成功 → 更新缓存
+            with _quota_cache_lock:
+                _quota_cache[provider_id] = (now, data)
+            self._send_json(200, data)
+        except (urllib.error.URLError, TimeoutError) as e:
+            # 超时 → fallback 到旧缓存（即使过期），无缓存才返回 504
+            if stale_cache:
+                data = dict(stale_cache[1])
+                data['cached'] = True
+                self._send_json(200, data)
+            else:
+                self._send_json(504, {'error': '上游API超时', 'cached': False})
         except Exception as e:
-            self.send_response(502)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'error': str(e)}).encode())
+            # 其他错误 → 也 fallback 到旧缓存
+            if stale_cache:
+                data = dict(stale_cache[1])
+                data['cached'] = True
+                self._send_json(200, data)
+            else:
+                self._send_json(502, {'error': str(e)})
 
     def do_OPTIONS(self):
         """处理 CORS preflight"""
         self.send_response(204)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', '*')
         self.end_headers()
 
+    def do_POST(self):
+        """处理登录表单提交"""
+        if self.path == '/login':
+            # 登录频率限制
+            client_ip = self.client_address[0]
+            if not _check_login_rate_limit(client_ip):
+                body = '<h1>Too many attempts</h1><p>请1分钟后再试。</p>'.encode('utf-8')
+                self.send_response(429)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', len(body))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8')
+            # parse application/x-www-form-urlencoded
+            from urllib.parse import parse_qs
+            params = parse_qs(body)
+            user = params.get('username', [''])[0]
+            passwd = params.get('password', [''])[0]
+            if user == _AUTH_USER and passwd == _AUTH_PASS:
+                token = _create_session(user)
+                remember = 'remember' in params
+                self.send_response(302)
+                self.send_header('Location', '/')
+                if remember:
+                    self.send_header('Set-Cookie', f'td_session={token}; Max-Age={_SESSION_MAX_AGE}; Path=/; SameSite=Lax; HttpOnly')
+                else:
+                    self.send_header('Set-Cookie', f'td_session={token}; Path=/; SameSite=Lax; HttpOnly')
+                self.end_headers()
+            else:
+                # 登录失败，返回登录页+错误提示
+                body = _LOGIN_HTML.replace('</div></body>', '<div class="err">用户名或密码错误</div></div></body>')
+                body = body.encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', len(body))
+                self.end_headers()
+                self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def _require_auth(self):
+        """检查认证（Cookie session）
+        本地直接访问（127.0.0.1/localhost）免认证
+        通过 Cloudflare Tunnel 的请求需要认证"""
+        client_ip = self.client_address[0]
+        is_direct_local = client_ip in ('127.0.0.1', 'localhost', '::1') and not self.headers.get('CF-Connecting-IP')
+        if is_direct_local:
+            return True
+        # 检查 cookie session
+        if _check_session(self):
+            return True
+        # 未登录，跳转登录页
+        _send_auth_challenge(self)
+        return False
+
     def do_GET(self):
+        # /login 页面不需要认证
+        if self.path == '/login':
+            _send_login_page(self)
+            return
+        # /logout 清除Cookie（JWT无状态，不需要服务端清理）
+        if self.path == '/logout':
+            self.send_response(302)
+            self.send_header('Location', '/login')
+            self.send_header('Set-Cookie', 'td_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax')
+            self.end_headers()
+            return
+        # 其他路由需要认证
+        if not self._require_auth():
+            return
         if self.path == '/providers':
             """返回动态 provider 列表（不含 apiKey）"""
             providers = _get_providers()
@@ -1154,7 +1620,7 @@ class H(http.server.SimpleHTTPRequestHandler):
             body = json.dumps(safe).encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
             self.end_headers()
             self.wfile.write(body)
         elif self.path.startswith('/quota/'):
@@ -1168,7 +1634,7 @@ class H(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': f'Unknown provider: {pid}'}).encode())
                 return
-            self._proxy_quota(p['quotaApi'], p['apiKey'])
+            self._proxy_quota(p['quotaApi'], p['apiKey'], pid)
         elif self.path == '/sessions-json':
             # 使用缓存层，避免每次轮询都 spawn CLI
             d = _get_cached_sessions()
@@ -1194,7 +1660,7 @@ class H(http.server.SimpleHTTPRequestHandler):
                 # 安全 TTL：如果超过5分钟没有收到 hasActiveRun=False 事件，
                 # 认为信号可能丢失，降级到其他检测方式
                 active_run_agents = set()
-                active_run_stale_ms = 5 * 60 * 1000  # 5分钟安全 TTL
+                active_run_stale_ms = 2 * 60 * 1000  # 2分钟安全 TTL（issue-0123：事件丢失时减少恢复延迟）
                 for aid in list(_agent_active_runs.keys()):
                     last_ts = _agent_ws_activity.get(aid, 0)
                     if now - last_ts < active_run_stale_ms:
@@ -1203,14 +1669,25 @@ class H(http.server.SimpleHTTPRequestHandler):
                         # 超过5分钟没有刷新，清除可能泄漏的标记
                         _agent_active_runs.pop(aid, None)
 
-                # === WS 实时活动检测：Gateway WS 事件更准确 ===
+                # === WS 实时活动检测：作为 hasActiveRun 的补充兜底 ===
                 # _agent_ws_activity 中有最近收到事件的 agentId → last_activity_ms
-                # 90秒内的 TTL 覆盖模型思考窗口（30-90秒）
+                # 30秒内的 TTL，hasActiveRun 是精确信号，WS活动只做补充
                 ws_active_agents = set()
-                ws_threshold = 90 * 1000  # 90秒内有事件 = 活跃
+                ws_threshold = 30 * 1000  # 30秒内有事件 = 活跃
                 for aid, ts in _agent_ws_activity.items():
                     if now - ts < ws_threshold:
                         ws_active_agents.add(aid)
+
+                # === 本地矫正（issue-86939）：Gateway 的 status 字段可能过时 ===
+                # 如果 agent 不在 active_run_agents 中，且 _agent_ws_activity 超过60秒没更新，
+                # 则认为该 agent 已经不在跑，即使 Gateway 的 status="running" 也是过时值。
+                # 在优先级链中跳过 working 判定，直接落到 age 检测。
+                local_correction_agents = set()
+                for _aid in list(_agent_ws_activity.keys()):
+                    if _aid not in active_run_agents:
+                        _last_act = _agent_ws_activity.get(_aid, 0)
+                        if now - _last_act > 60 * 1000:  # 60秒无 WS 活动
+                            local_correction_agents.add(_aid)
 
                 agent_info = {}
                 for aid in ALL_AGENTS:
@@ -1252,26 +1729,39 @@ class H(http.server.SimpleHTTPRequestHandler):
                     effective_age = main_age
                     if sub_age is not None and (effective_age is None or sub_age < effective_age):
                         effective_age = sub_age
+                    # 本地矫正（issue-86939）：被标记的 agent 跳过 working 判定，
+                    # 直接落到 age 检测（优先级4/5）
+                    _corrected = aid in local_correction_agents
                     # 判定优先级：
                     #   1. hasActiveRun=True（Gateway 精确信号）→ working
+                    #      本地矫正时跳过（active_run_agents 已不含该 agent）
                     #   2. 有活跃exec进程 → working（强信号）
-                    #   3. WS 90秒内有事件 → working（覆盖模型思考窗口）
+                    #   3. WS 30秒内有事件 → working（补充兜底）
+                    #      本地矫正时跳过（防止 Gateway 过时 status 残留）
                     #   4. updatedAt 90秒内 → working（覆盖模型思考窗口）
+                    #      ⚠️ local_correction 激活时降级为 waiting（issue-0165）
                     #   5. updatedAt 90秒-10分钟 → waiting
                     #   6. 超过10分钟 → idle
                     # hasActiveRun 是最精确的信号，直接来自 Gateway 内部状态
-                    if aid in active_run_agents:
+                    if not _corrected and aid in active_run_agents:
                         status = 'working'
                     elif aid in active_agents:
                         status = 'working'
-                    elif aid in ws_active_agents:
+                    elif not _corrected and aid in ws_active_agents:
                         status = 'working'
                     elif effective_age is None or effective_age > 10 * 60 * 1000:
                         status = 'idle'
                     elif effective_age > 90 * 1000:
                         status = 'waiting'
+                    elif _corrected:
+                        # local_correction 激活时，Gateway 的 updatedAt 不可信（可能被后台刷新），
+                        # 降级为 waiting 而非 working。等真正的新 turn 开始时 hasActiveRun=True 会覆盖。
+                        status = 'waiting'
                     else:
                         status = 'working'
+                    # 僵尸session检测（issue-0155）：idle超过30分钟
+                    if status == 'idle' and effective_age is not None and effective_age > 30 * 60 * 1000:
+                        status = 'stale'
                     # 从 transcript 读真实模型/provider，优先 direct 主会话，fallback 到 session 配置值
                     _sid = info.get('directSessionId', '') or info.get('sessionId', '')
                     # 从 transcript 读最近 N 条实际模型分布（主会话 + subagent 合并统计）
@@ -1300,7 +1790,7 @@ class H(http.server.SimpleHTTPRequestHandler):
                 body = json.dumps({'error': str(e)}).encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
             self.end_headers()
             self.wfile.write(body)
         elif self.path == '/cron-json':
@@ -1336,7 +1826,7 @@ class H(http.server.SimpleHTTPRequestHandler):
                 body = json.dumps({'error': str(e)}).encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
             self.end_headers()
             self.wfile.write(body)
         elif self.path == '/health-json':
@@ -1365,6 +1855,9 @@ class H(http.server.SimpleHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(str(e).encode())
             else:
+                # 静态文件也需要认证
+                if not self._require_auth():
+                    return
                 super().do_GET()
 
     def log_message(self, *a):
@@ -1379,5 +1872,5 @@ if __name__ == '__main__':
     _mem_thread = threading.Thread(target=_memory_watchdog_loop, daemon=True, name='mem-watchdog')
     _mem_thread.start()
 
-    httpd = http.server.HTTPServer(('0.0.0.0', 18888), H)
+    httpd = http.server.ThreadingHTTPServer(('0.0.0.0', 18888), H)
     httpd.serve_forever()
