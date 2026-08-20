@@ -1113,72 +1113,283 @@ def _get_gateway_token():
         return ''
 
 
-def _detect_active_process_agents():
-    """检测哪些 agent 有活跃的 exec 进程（python/node/ffmpeg），返回 agentId set"""
+# ── 进程快照与 Gateway 进程树归属（2026-08-20 exec归因修复）──────────────
+# 背景：系统 cron（twitter_monitor/巡检/邮件监控）跑在公共 workspace 路径下，
+# 旧逻辑按「命令行含 workspace 路径」归因 → cron 一启动就把罗氏虾误标 working。
+# 新逻辑：只有 PPID 链回溯到 Gateway 进程的才是虾的活跃 exec（进程树归属）；
+# cron/launchd 起的进程 PPID 链不通到 Gateway，天然排除。
+# 性能：单次 ps 快照 + 内存回溯，禁止逐级 ps 子调用；Gateway PID 每次实时解析、
+# 绝不缓存（launchd 托管，重启后 PID 必变）。
+
+_PS_SNAPSHOT_TTL = 5  # 秒；两次 ps 之间的最短间隔（agent-status 轮询与任务栏线程共享同一次快照）
+_ps_snapshot_cache = {'rows': None, 'ts': 0.0}
+_ps_snapshot_lock = threading.Lock()
+
+def _ps_snapshot():
+    """单次 `ps -A -o pid=,ppid=,etime=,command=` 快照（短TTL缓存，全模块共享）。
+    返回 [(pid, ppid, elapsed_sec_or_None, cmd)]，异常时返回 []。"""
+    now = time.time()
+    with _ps_snapshot_lock:
+        if _ps_snapshot_cache['rows'] is not None and now - _ps_snapshot_cache['ts'] < _PS_SNAPSHOT_TTL:
+            return _ps_snapshot_cache['rows']
     try:
-        r = subprocess.run(['ps', 'aux'], capture_output=True, text=True, timeout=5)
-        lines = r.stdout.strip().split('\n')[1:]  # skip header
+        r = subprocess.run(['ps', '-A', '-o', 'pid=,ppid=,etime=,command='],
+                           capture_output=True, text=True, timeout=5)
+        rows = []
+        for line in r.stdout.split('\n'):
+            parts = line.strip().split(None, 3)
+            if len(parts) == 4:
+                try:
+                    rows.append((int(parts[0]), int(parts[1]), _etime_to_sec(parts[2]), parts[3]))
+                except ValueError:
+                    continue
+        with _ps_snapshot_lock:
+            _ps_snapshot_cache['rows'] = rows
+            _ps_snapshot_cache['ts'] = now
+        return rows
+    except Exception:
+        return []
+
+def _etime_to_sec(s):
+    """ps etime 字段（[[dd-]hh:]mm:ss）转秒数"""
+    try:
+        days = 0
+        if '-' in s:
+            d, s = s.split('-', 1)
+            days = int(d)
+        sec = 0
+        for p in s.split(':'):
+            sec = sec * 60 + int(p)
+        return days * 86400 + sec
+    except Exception:
+        return None
+
+def _find_gateway_pids(rows=None):
+    """从快照实时解析 Gateway PID 集合（绝不缓存结果）。
+    识别：命令行含 openclaw/dist/index.js + gateway（与 _gateway_health 同口径）"""
+    rows = rows if rows is not None else _ps_snapshot()
+    pids = set()
+    for pid, _ppid, _et, cmd in rows:
+        if 'openclaw/dist/index.js' in cmd and ' gateway' in cmd:
+            pids.add(pid)
+    return pids
+
+def _gateway_derived_pids(rows, gateway_pids):
+    """在内存中回溯 PPID 链，返回所有 Gateway 衍生进程的 PID 集合（不含 Gateway 本身）。
+    单次快照内回溯，无逐级 subprocess 调用；链断（父进程已退出）按非衍生处理（安全侧）。"""
+    if not gateway_pids:
+        return set()
+    ppid_of = {pid: ppid for pid, ppid, _et, _cmd in rows}
+    derived = set()
+    for pid, ppid, _et, _cmd in rows:
+        if pid in gateway_pids:
+            continue
+        cur, hops, seen = ppid, 0, set()
+        while cur and cur > 1 and hops < 16:
+            if cur in gateway_pids:
+                derived.add(pid)
+                break
+            if cur in seen:  # 环保护
+                break
+            seen.add(cur)
+            cur = ppid_of.get(cur)
+            if cur is None:  # 快照瞬间父进程已退出 → 链断，按非衍生处理
+                break
+            hops += 1
+    return derived
+
+# workspace 路径 → agentId 归因标记（与旧版口径一致）
+_AGENT_PATH_MARKERS = {
+    'pipixia': ('workspace-pipixia', 'workspace_pipixia'),
+    'jiweixia': ('workspace-jiweixia', 'workspace_jiweixia'),
+    'xiaohexia': ('workspace-xiaohexia', 'workspace_xiaohexia'),
+    'yoooclaw': ('workspace-yoooclaw', 'workspace_yoooclaw'),
+    'banjiexia': ('workspace-banjiexia', 'workspace_banjiexia'),
+    'caoxia': ('workspace-caoxia', 'workspace_caoxia'),
+    'duijiaoxia': ('workspace-duijiaoxia', 'workspace_duijiaoxia'),
+}
+
+def _detect_active_process_agents():
+    """检测哪些 agent 有活跃的 exec 进程，返回 agentId set。
+
+    2026-08-20 重写为「进程树归属」（exec归因修复）：
+    - 旧逻辑按「命令行含 workspace 路径」归因，系统 cron（twitter_monitor/巡检/
+      邮件监控）恰好跑在公共 workspace 路径下 → cron 一启动就把罗氏虾误标 working。
+    - 新逻辑：只有 PPID 链回溯到 Gateway 进程的才是虾的活跃 exec；
+      cron/launchd 起的进程 PPID 链不通到 Gateway，天然排除。
+    - Gateway PID 每次从 ps 快照实时解析，绝不缓存（launchd 托管，重启后 PID 必变）。
+    - 性能：单次 ps 快照 + 内存回溯 PPID 链，无逐级 ps 子调用。
+    - Gateway 解析不到时安全降级：返回空集（本优先级不判任何虾 working）。
+    """
+    try:
+        rows = _ps_snapshot()
+        gw_pids = _find_gateway_pids(rows)
+        if not gw_pids:
+            # Y2 安全降级：解析不到 Gateway（重启窗口/ps异常）→ 本优先级跳过，
+            # 不算任何虾 working，交给 hasActiveRun/WS/age 三级兜底
+            return set()
+        derived = _gateway_derived_pids(rows, gw_pids)
         active = set()
-        for line in lines:
-            ll = line.lower()
-            # 只关注可能属于 agent exec 的进程
-            if not any(kw in ll for kw in ['python3', 'node', 'ffmpeg', 'kling']):
+        for pid, ppid, _et, cmd in rows:
+            if pid not in derived:
+                continue  # 非 Gateway 衍生（cron/launchd/常驻服务）→ 不归因任何虾
+            ll = cmd.lower()
+            # 只关注可能属于 agent exec 的进程类型（与旧版关键字口径一致）
+            if not any(kw in ll for kw in ['python3', 'python', '/node', 'node ', 'ffmpeg', 'kling']):
                 continue
-            # 排除看板自身和 gateway
-            if 'token_dashboard' in ll or 'openclaw/dist/index.js' in ll:
+            # 排除看板自身（本服务进程不归因任何虾）
+            if 'token_dashboard' in ll:
                 continue
-            if 'SimpleHTTP' in ll or 'http.server' in ll:
-                continue
-            # 按工作目录关键字匹配 agent
-            if 'workspace-pipixia' in ll or 'workspace_pipixia' in ll:
-                active.add('pipixia')
-            if 'workspace-jiweixia' in ll or 'workspace_jiweixia' in ll:
-                active.add('jiweixia')
-            if 'workspace-xiaohexia' in ll or 'workspace_xiaohexia' in ll:
-                active.add('xiaohexia')
-            if 'workspace-yoooclaw' in ll or 'workspace_yoooclaw' in ll:
-                active.add('yoooclaw')
-            if 'workspace-banjiexia' in ll or 'workspace_banjiexia' in ll:
-                active.add('banjiexia')
-            if 'workspace-caoxia' in ll or 'workspace_caoxia' in ll:
-                active.add('caoxia')
-            if 'workspace-duijiaoxia' in ll or 'workspace_duijiaoxia' in ll:
-                active.add('duijiaoxia')
-            # 项目目录关键字匹配
-            if '蒸馏' in line or 'distill' in ll:
-                # 蒸馏任务可能属于任何虾，按进程所属区分
-                for aid, kw in [('banjiexia', 'workspace-banjiexia'), ('jiweixia', 'workspace-jiweixia')]:
-                    if kw in ll:
-                        active.add(aid)
-            # 按项目路径匹配
-            for aid, patterns in {
-                'pipixia': ['workspace-pipixia'],
-                'jiweixia': ['workspace-jiweixia'],
-                'banjiexia': ['workspace-banjiexia'],
-                'caoxia': ['workspace-caoxia'],
-                'duijiaoxia': ['workspace-duijiaoxia'],
-                'xiaohexia': ['workspace-xiaohexia'],
-                'yoooclaw': ['workspace-yoooclaw'],
-            }.items():
-                for p in patterns:
-                    if p in ll:
-                        active.add(aid)
-        # CEO 的 workspace 是 workspace/（无后缀），需要单独匹配
-        # 注意：workspace-xxx 已经被上面的条件处理了，这里只匹配无后缀的 workspace/
-        for line in lines:
-            ll = line.lower()
-            if not any(kw in ll for kw in ['python3', 'node', 'ffmpeg', 'kling']):
-                continue
-            if 'token_dashboard' in ll or 'openclaw/dist/index.js' in ll:
-                continue
-            if 'simplehttp' in ll or 'http.server' in ll:
-                continue
-            # 匹配 CEO: workspace/ 后面跟 ai_workspace 或 projects 等，但不能是 workspace-
+            # 按命令行中的 workspace 路径归因到具体虾（与旧版路径口径一致）
+            for aid, markers in _AGENT_PATH_MARKERS.items():
+                if any(m in ll for m in markers):
+                    active.add(aid)
+            # CEO 的 workspace 是 workspace/（无后缀），单独匹配；
+            # 注意：workspace-xxx 已被上面处理，这里只匹配无后缀的 workspace/
             if '/.openclaw/workspace/' in ll and 'workspace-' not in ll:
                 active.add('main')
         return active
     except Exception:
         return set()
+
+# ── 系统任务栏（2026-08-20）：非Gateway衍生的定时任务进程可见性，仅看板网页可见，不进TG推送 ──
+# 语义边界：虾卡片 = LLM turn + Gateway衍生exec（token相关）；系统任务栏 = 机器上的
+# cron/launchd 活动（零token）；token统计不变。
+_TD_DATA_DIR = os.path.join(os.path.expanduser('~'), '.openclaw/workspace/ai_workspace/projects/token-dashboard', 'data')
+_SYS_TASK_STATE_FILE = os.path.join(_TD_DATA_DIR, 'system_tasks_state.json')
+
+# 已知任务名单（首版）；config.json 的 system_tasks 键可扩展/覆盖（config可扩展）
+DEFAULT_SYSTEM_TASKS = [
+    {'name': 'Twitter KOL监控', 'owner': '系统', 'period': '每20/30分钟', 'match': ['collectors.twitter_monitor']},
+    {'name': '服务器巡检·健康巡检', 'owner': '基围虾/运维', 'period': '每15分钟', 'match': ['health_check.py']},
+    {'name': '服务器巡检·日志轮转', 'owner': '基围虾/运维', 'period': '每小时25分', 'match': ['gateway_log_rotate.sh']},
+    {'name': '服务器巡检·tmp清理', 'owner': '基围虾/运维', 'period': '每日07:00', 'match': ['clean_workspace_tmp.py']},
+    {'name': '邮件监控', 'owner': '系统', 'period': '每30分钟', 'match': ['email_monitor.py']},
+    {'name': 'Git自动备份', 'owner': '基围虾', 'period': '每日06:28', 'match': ['git_backup.sh', 'monitor_0628.sh']},
+]
+
+def _load_system_task_defs():
+    """任务名单：config.json 的 system_tasks 键存在且非空则整体覆盖，否则用内置名单"""
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        defs = cfg.get('system_tasks')
+        if isinstance(defs, list) and defs:
+            out = []
+            for d in defs:
+                if isinstance(d, dict) and d.get('name') and d.get('match'):
+                    out.append({'name': str(d['name']), 'owner': str(d.get('owner', '系统')),
+                                'period': str(d.get('period', '')),
+                                'match': [str(m) for m in d['match'] if m]})
+            if out:
+                return out
+    except Exception:
+        pass
+    return DEFAULT_SYSTEM_TASKS
+
+_sys_task_state = {'tasks': {}}          # name → {'time','durationSec','exit'} 最近一次运行记录（持久化）
+_sys_task_lock = threading.Lock()
+_sys_task_latest = {'tasks': [], 'unknown': [], 'ts': 0}  # 最近一次扫描结果（供 /system-tasks 端点）
+_sys_task_seen = {}                       # name → {'elapsedSec','ts','startTs'} 用于运行→结束转换时算时长
+_SYS_TASK_SCAN_INTERVAL = 5               # 秒（短任务不漏拍：health_check类短巡检<10s也能捕捉）
+
+def _sys_task_load_state():
+    """看板重启后最近一次运行记录不丢（验收5）"""
+    try:
+        with open(_SYS_TASK_STATE_FILE) as f:
+            data = json.load(f)
+        if isinstance(data.get('tasks'), dict):
+            with _sys_task_lock:
+                _sys_task_state['tasks'] = data['tasks']
+    except Exception:
+        pass
+
+def _sys_task_save_state():
+    try:
+        os.makedirs(_TD_DATA_DIR, exist_ok=True)
+        tmp = _SYS_TASK_STATE_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump({'tasks': _sys_task_state['tasks'], 'updatedAt': time.time()}, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, _SYS_TASK_STATE_FILE)
+    except Exception as e:
+        logging.warning(f'[SysTask] 状态持久化失败: {e}')
+
+def _sys_task_scan_once():
+    """扫描一次系统进程：已知任务运行态 + 未识别python定时进程兑底。
+    同时维护 运行中→结束 转换并把「最近一次」写入 data/system_tasks_state.json。"""
+    rows = _ps_snapshot()
+    gw_pids = _find_gateway_pids(rows)
+    derived = _gateway_derived_pids(rows, gw_pids)
+    now = time.time()
+    defs = _load_system_task_defs()
+    matched_pids = set()
+    running_now = {}
+    for d in defs:
+        procs = []
+        for pid, ppid, et, cmd in rows:
+            if pid in derived or pid in matched_pids or pid in gw_pids:
+                continue
+            if any(m in cmd for m in d['match']):
+                procs.append((pid, et, cmd))
+                matched_pids.add(pid)
+        if procs:
+            el = max((et for _p, et, _c in procs if et is not None), default=None)
+            running_now[d['name']] = {'elapsedSec': el, 'procCount': len(procs)}
+    # 未识别兑底：非名单内、非Gateway衍生、含workspace路径的 python 定时进程（只显示不归因）
+    # 排除常驻服务（跑超过30分钟的 python 服务不是定时任务，避免任务栏长期挂噪音）
+    unknown = []
+    for pid, ppid, et, cmd in rows:
+        if pid in derived or pid in matched_pids or pid in gw_pids:
+            continue
+        ll = cmd.lower()
+        if 'python' not in ll:
+            continue
+        if 'token_dashboard' in ll:
+            continue
+        if '.openclaw/workspace' not in cmd and 'ai_workspace' not in cmd:
+            continue
+        if et is not None and et > 1800:
+            continue
+        # 摘要取尾部：脚本名/参数在命令行尾部，头部都是路径前缀
+        summary = cmd if len(cmd) <= 100 else '…' + cmd[-95:]
+        unknown.append({'pid': pid, 'elapsedSec': et, 'cmdSummary': summary})
+    # 运行→结束转换：记录最近一次（时间=开始时刻，时长=上次见到时的已跑秒数+扫描间隔，退出=正常）
+    # 注：ps 拿不到退出码，「正常」=进程完整跑完后消失（中途被 kill 的场景 v1 无法区分，已知局限）
+    with _sys_task_lock:
+        for name, seen in list(_sys_task_seen.items()):
+            if name not in running_now:
+                dur = int((seen.get('elapsedSec') or 0) + (now - seen.get('ts', now)))
+                _sys_task_state['tasks'][name] = {
+                    'time': time.strftime('%m-%d %H:%M', time.localtime(seen.get('startTs', now))),
+                    'durationSec': dur, 'exit': 'normal'}
+                _sys_task_seen.pop(name, None)
+                _sys_task_save_state()
+        for name, info in running_now.items():
+            prev = _sys_task_seen.get(name)
+            start_ts = prev['startTs'] if prev else (now - (info['elapsedSec'] or 0))
+            _sys_task_seen[name] = {'elapsedSec': info['elapsedSec'], 'ts': now, 'startTs': start_ts}
+        # 转换处理完成后再组装输出（保证刚结束的任务立刻带上「最近一次」记录）
+        tasks_out = []
+        for d in defs:
+            rn = running_now.get(d['name'])
+            tasks_out.append({'name': d['name'], 'owner': d['owner'], 'period': d['period'],
+                              'running': rn is not None,
+                              'elapsedSec': rn.get('elapsedSec') if rn else None,
+                              'procCount': rn.get('procCount', 0) if rn else 0,
+                              'last': _sys_task_state['tasks'].get(d['name'])})
+        _sys_task_latest['tasks'] = tasks_out
+        _sys_task_latest['unknown'] = unknown[:5]  # 最多展示5条，防刷屏
+        _sys_task_latest['ts'] = int(now * 1000)
+
+def _sys_task_monitor_loop():
+    """后台扫描线程：独立于前端轮询，保证没人开看板时也能捕捉运行→结束转换并持久化"""
+    while True:
+        try:
+            _sys_task_scan_once()
+        except Exception as e:
+            logging.warning(f'[SysTask] 扫描异常: {e}')
+        time.sleep(_SYS_TASK_SCAN_INTERVAL)
 
 @cached(60)
 def _get_openclaw_cron():
@@ -1889,6 +2100,20 @@ class H(http.server.SimpleHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == '/system-tasks':
+            """系统任务栏数据（非Gateway衍生的定时任务进程，仅看板可见，不进TG推送）"""
+            try:
+                with _sys_task_lock:
+                    data = {'tasks': _sys_task_latest['tasks'], 'unknown': _sys_task_latest['unknown'],
+                            'ts': _sys_task_latest['ts'], 'now': int(time.time() * 1000)}
+                body = json.dumps(data).encode()
+            except Exception as e:
+                body = json.dumps({'error': str(e)}).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == '/health-json':
             data = _get_system_health()
             body = json.dumps(data).encode()
@@ -1927,6 +2152,12 @@ if __name__ == '__main__':
     # 启动 Gateway WebSocket 监听线程（实时 agent 活动状态）
     _ws_thread = threading.Thread(target=_ws_listener_loop, daemon=True, name='ws-listener')
     _ws_thread.start()
+
+    # 系统任务栏（2026-08-20）：先加载持久化状态并同步扫一次，再起后台扫描线程
+    _sys_task_load_state()
+    _sys_task_scan_once()
+    _systask_thread = threading.Thread(target=_sys_task_monitor_loop, daemon=True, name='sys-task-monitor')
+    _systask_thread.start()
 
     # 内存泄漏防护（应用层，plist 硬限可能未生效）
     _mem_thread = threading.Thread(target=_memory_watchdog_loop, daemon=True, name='mem-watchdog')

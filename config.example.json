@@ -8,5 +8,8 @@
     "bot_token": "YOUR_BOT_TOKEN",
     "chat_id": "YOUR_CHAT_ID"
   },
-  "work_dir": "/home/YOUR_USER/ai_workspace/scripts"
+  "work_dir": "/home/YOUR_USER/ai_workspace/scripts",
+  "system_tasks": [
+    {"name": "示例任务", "owner": "系统", "period": "每30分钟", "match": ["example_script.py"]}
+  ]
 }
