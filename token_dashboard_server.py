@@ -499,6 +499,66 @@ def _gateway_health():
         pass
     return info
 
+def _hermes_health():
+    """Hermes 网关健康监测（2026-08-18 匡书记批准新增）
+    监测三层维持措施：进程存活+uptime、gateway.heartbeat 心跳年龄、watchdog 动作日志
+    """
+    import subprocess as _sp
+    hermes_home = os.path.join(os.path.expanduser('~'), '.hermes')
+    info = {
+        'running': False, 'pid': None, 'uptimeHours': None,
+        'hbAgeSec': None, 'hbFresh': False,
+        'watchdogLast': None, 'watchdogTriggered': False,
+        'note': '',
+    }
+    # 1. 进程存活 + uptime
+    try:
+        out = _sp.check_output(['ps', '-A', '-o', 'pid,etime,command'], text=True)
+        for line in out.splitlines():
+            if 'hermes_cli.main' in line and ' gateway' in line and 'grep' not in line:
+                info['running'] = True
+                parts = line.split()
+                info['pid'] = int(parts[0])
+                et = parts[1]
+                if '-' in et:
+                    d, hms = et.split('-', 1)
+                    h, m, s = hms.split(':')
+                    info['uptimeHours'] = round(int(d) * 24 + int(h) + int(m) / 60, 1)
+                else:
+                    p2 = et.split(':')
+                    if len(p2) == 3:
+                        # HH:MM:SS（超1小时场景，如 30:30:00 = 30.5h）
+                        info['uptimeHours'] = round(int(p2[0]) + int(p2[1]) / 60, 1)
+                    elif len(p2) == 2:
+                        # MM:SS（不足1小时）
+                        info['uptimeHours'] = round(int(p2[0]) / 60 + int(p2[1]) / 3600, 2)
+                break
+    except Exception:
+        pass
+    # 2. 心跳文件年龄（正常 30s 刷新一次；>600s = 假死信号，与 watchdog STALE_SECS 一致）
+    try:
+        hb_file = os.path.join(hermes_home, 'state', 'gateway.heartbeat')
+        if os.path.exists(hb_file):
+            age = time.time() - os.path.getmtime(hb_file)
+            info['hbAgeSec'] = int(age)
+            info['hbFresh'] = age <= 600
+        else:
+            info['note'] = '心跳文件不存在'
+    except Exception:
+        pass
+    # 3. watchdog 最近一次动作（日志只在触发重启时写）
+    try:
+        wd_log = '/tmp/hermes-watchdog.log'
+        if os.path.exists(wd_log):
+            with open(wd_log) as f:
+                lines = [l.strip() for l in f if l.strip()]
+            if lines:
+                info['watchdogLast'] = lines[-1]
+                info['watchdogTriggered'] = True
+    except Exception:
+        pass
+    return info
+
 def _last_actual_model(session_id, agent_id):
     """向后兼容：返回最近一条 assistant 消息的 (model, provider)。底层复用 _recent_model_dist。"""
     p = _recent_model_dist(session_id, agent_id)
@@ -1785,7 +1845,7 @@ class H(http.server.SimpleHTTPRequestHandler):
                     })
                 agent_order = {aid: i for i, aid in enumerate(ALL_AGENTS)}
                 agents.sort(key=lambda a: agent_order.get(a['agentId'], 99))
-                body = json.dumps({'agents': agents, 'now': now, 'wsConnected': _ws_connected, 'activeRunAgents': list(_agent_active_runs.keys()), 'gatewayHealth': _gateway_health()}).encode()
+                body = json.dumps({'agents': agents, 'now': now, 'wsConnected': _ws_connected, 'activeRunAgents': list(_agent_active_runs.keys()), 'gatewayHealth': _gateway_health(), 'hermesHealth': _hermes_health()}).encode()
             except Exception as e:
                 body = json.dumps({'error': str(e)}).encode()
             self.send_response(200)
