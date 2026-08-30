@@ -680,6 +680,7 @@ CRON_PURPOSE = {
     '看脸实验室-每周选题补充（皮皮虾）': '内容 · 看脸实验室每周选题池补充',
     '颜姐-每日内容卡片（皮皮虾）': '内容 · 颜姐日推卡片生成（v3.1换马kimi/k3）',
     '颜姐-周日复盘+选题（皮皮虾）': '内容 · 颜姐周日复盘与选题规划',
+    '颜姐-周日回流（皮皮虾）': '内容 · 颜姐账号周批回流（8-28拍板周批模式，周日07:30）',
     '颜姐-每日快照（皮皮虾）': '数据 · 颜姐账号日频快照（停用待命，未来或恢复日频，issue-0157已收口）',
     '聚萤-月初财税提醒': '财税 · 聚萤月初财税提醒（每月1日）',
     '[手动停用] Token用量推送': '运维 · Token用量TG推送（历史停用，看板已替代）',
@@ -1618,6 +1619,10 @@ def _get_crontab():
                 purpose = '[量化看板] 交易信号追踪'
             elif 'health_check.py' in full_cmd:
                 purpose = '[虾厂运维] 系统健康巡检（LLM/Gateway/代理/磁盘）'
+            elif 'cron_delivery_snapshot' in full_cmd:
+                purpose = '[虾厂运维] cron投递状态快照（7天滚动日志）'
+            elif 'tg_deadletter_resend' in full_cmd:
+                purpose = '[虾厂运维] TG死信队列自动重发（每分钟）'
             elif 'clean_workspace_tmp' in full_cmd:
                 purpose = '[虾厂运维] workspace tmp 目录自动清理'
             elif 'econ_result_analyzer' in full_cmd:
