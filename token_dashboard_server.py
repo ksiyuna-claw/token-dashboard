@@ -1265,7 +1265,10 @@ DEFAULT_SYSTEM_TASKS = [
     {'name': '服务器巡检·日志轮转', 'owner': '基围虾/运维', 'period': '每小时25分', 'match': ['gateway_log_rotate.sh']},
     {'name': '服务器巡检·tmp清理', 'owner': '基围虾/运维', 'period': '每日07:00', 'match': ['clean_workspace_tmp.py']},
     {'name': '邮件监控', 'owner': '系统', 'period': '每30分钟', 'match': ['email_monitor.py']},
-    {'name': 'Git自动备份', 'owner': '基围虾', 'period': '每日06:28', 'match': ['git_backup.sh', 'monitor_0628.sh']},
+    # 2026-08-27 移除「Git自动备份」条目：该任务已是 OpenClaw cron（agent_id=jiweixia），
+    # 由 Gateway 派生执行 git_backup.sh；本扫描器按设计边界排除一切 Gateway 派生进程
+    # （见 _gateway_derived_pids 注释），此条目自上线起永远匹配不到，看板恒显「暂无运行记录」。
+    # 其真实运行状态在 /cron 定时任务总览页正常展示（sqlite 实证 8-27 06:28 ok delivered）。
 ]
 
 def _load_system_task_defs():

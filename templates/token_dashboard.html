@@ -320,6 +320,8 @@ function colorForModel(model) {
 function modelAbbr(model) {
   const m = String(model || '').toLowerCase();
   if (m.includes('deepseek')) return 'DS';
+  // flash 先判：压缩模式下与 glm-5.3 同显'GLM'无法区分（2026-08-27 flash灰度期新增）
+  if (m.includes('glm') && m.includes('flash')) return 'Flash';
   if (m.includes('glm')) return 'GLM';
   if (m.includes('qwen') || m.includes('千问') || m.includes('tongyi')) return 'QW';
   /* 2026-07-23 MiniMax套餐到期下线，代码保留备用 */
