@@ -623,19 +623,21 @@ def _get_providers():
         return []
 
 # ── 用途标注（服务/调度 → 所属项目）──────────────────────────
+# 2026-08-27 全量对齐 sqlite 实际 job 名（旧键名与现名不符致总览页用途列大面积"—"，匡书记报修）
 CRON_PURPOSE = {
-    '虾厂巡检(凌晨)': '运维 · 清晨语义巡检（罗氏虾）',
-    '虾厂巡检(晚)': '运维 · 傍晚综合巡检',
-    'Token用量推送': '运维 · Token用量TG推送',
-    'AI视频行业日报(周二)': '内容 · AI视频行业周报',
-    '网站健康检查': '运维 · AI影视网站健康检查（每3h）',
-    'AI影视数据采集': '内容 · AI影视每日数据采集（5am）',
-    '国学运势每日推送': '国学运势 · 每日推送',
-    '桐姐运势-每日素材推送': '国学运势 · 每日素材推送',
-    '每周前沿Agent研究扫描': 'AI研究 · Agent前沿扫描',
-    '脱友2回测流水线检查': '内容 · 脱友回测检查',
-    'Git自动备份': '运维 · 虾厂Git自动备份（每天06:28）',
-    'shanbei-daily-quant-lesson': '量化看板 · 扇贝每日量化课程采集',
+    'Git自动备份': '运维 · 虾厂Git自动备份（每天06:28，flash灰度中）',
+    '凌晨巡检(06:00)': '运维 · 基围虾清晨系统巡检（quiet只报紧急异常）',
+    '晚间巡检(21:15)': '运维 · 基围虾晚间综合巡检（当日全量汇报）',
+    '看脸实验室-每日内容（皮皮虾）': '内容 · 看脸实验室每日内容生产（kimi/k3）',
+    '看脸实验室-每周选题补充（皮皮虾）': '内容 · 看脸实验室每周选题池补充',
+    '颜姐-每日内容卡片（皮皮虾）': '内容 · 颜姐日推卡片生成（v3.1换马kimi/k3）',
+    '颜姐-周日复盘+选题（皮皮虾）': '内容 · 颜姐周日复盘与选题规划',
+    '颜姐-每日快照（皮皮虾）': '数据 · 颜姐账号日频快照（停用待命，未来或恢复日频，issue-0157已收口）',
+    '聚萤-月初财税提醒': '财税 · 聚萤月初财税提醒（每月1日）',
+    '[手动停用] Token用量推送': '运维 · Token用量TG推送（历史停用，看板已替代）',
+    '[手动停用] 每周前沿Agent研究扫描': 'AI研究 · Agent前沿周扫（历史停用，心跳方向3覆盖）',
+    '[手动停用] AI视频行业日报(周二)': '内容 · AI视频行业周报（历史停用）',
+    '[手动停用] shanbei-daily-quant-lesson': '量化看板 · 扇贝每日量化课（历史停用）',
 }
 
 # 所有 agent ID（用于遍历 cron）
@@ -757,6 +759,7 @@ def _get_system_health():
 LAUNCH_PURPOSE = {
     'ai.openclaw.gateway': '虾厂核心 · OpenClaw Gateway 主进程',
     'ai.hermes.gateway': 'AI基础设施 · Hermes 知识映射 Gateway',
+    'ai.hermes.watchdog': 'AI基础设施 · Hermes 看门狗（每6h自愈：进程存活+心跳年龄检查）',
     'ai.hermes.cleanup-locks': 'AI基础设施 · Hermes 开机锁文件清理（防 PID 复用导致误锁）',
     'com.openclaw.token-dashboard': '运维 · Token看板 HTTP服务 (18888)',
     'com.openclaw.cloudflared': '运维 · Cloudflare Tunnel 外网穿透（token-dashboard.crypto-signal.work / quant-dashboard）',
@@ -1585,6 +1588,8 @@ def _get_crontab():
                 purpose = '[聚光萤] 云端服务监控（每30分钟，异常时TG告警）'
             elif 'backup.sh' in full_cmd or 'zhitai' in full_cmd:
                 purpose = '[虾厂运维] 智泰硬盘全量备份（每天06:40，成功/失败TG推送）'
+            elif 'gateway_log_rotate' in full_cmd:
+                purpose = '[虾厂运维] Gateway 日志轮转（每小时25分，防日志膨胀）'
             # 找对应注释
             comment = ''
             for c in comments:
