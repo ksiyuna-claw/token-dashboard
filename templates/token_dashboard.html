@@ -172,7 +172,7 @@
 <div class="section" id="cronSection">
   <div class="section-title">⏱ 定时任务</div>
   <div class="cron-subtitle" id="cronSubtitle">正在获取...</div>
-  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">📋 OpenClaw 定时任务</div><div class="cron-table"><table><thead><tr><th>任务名</th><th>Agent</th><th>用途</th><th>周期</th><th>上次执行</th><th>状态</th><th>下次执行</th></tr></thead><tbody id="cronOpenclawBody"><tr><td colspan="7" class="loading">正在获取...</td></tr></tbody></table></div></div>
+  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">📋 OpenClaw 定时任务</div><div class="cron-table"><table><thead><tr><th>任务名</th><th>Agent</th><th>用途</th><th>周期</th><th>上次执行</th><th>状态</th><th>下次执行</th><th>模型</th></tr></thead><tbody id="cronOpenclawBody"><tr><td colspan="8" class="loading">正在获取...</td></tr></tbody></table></div></div>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">⚙️ 系统 Crontab</div><div class="cron-table"><table><thead><tr><th>用途</th><th>周期</th><th>命令 <small style="color:var(--dim)">（点击展开）</small></th></tr></thead><tbody id="cronCrontabBody"><tr><td colspan="3" class="loading">正在获取...</td></tr></tbody></table></div></div>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🖥️ 系统服务</div><div class="cron-table"><table><thead><tr><th>服务名</th><th>用途</th><th>运行方式</th><th>开机启动</th><th>状态</th></tr></thead><tbody id="cronLaunchBody"><tr><td colspan="5" class="loading">正在获取...</td></tr></tbody></table></div></div>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🧠 Gateway 健康</div><div id="gatewayHealthBox" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim)">加载中...</div></div>
@@ -806,6 +806,11 @@ async function fetchCron() {
       if (j.lastRunStatus === 'ok') statusHtml = '<span class="cron-status-ok">✅</span>';
       else if (j.lastRunStatus === 'error') statusHtml = '<span class="cron-status-error">❌ ' + (j.consecutiveErrors||0) + '次</span>';
       else statusHtml = '<span class="cron-status-unknown">❓</span>';
+      // 模型列（2026-08-29 新增）：优先实际运行模型，其次配置值，最后默认继承；hover 看全名
+      let modelHtml;
+      if (j.lastModel) modelHtml = `<span title="${mEsc(j.lastModel)}（最近一次实际运行）">${modelAbbr(j.lastModel)}</span>`;
+      else if (j.configModel) modelHtml = `<span title="${mEsc(j.configModel)}（配置，尚未运行过）" style="color:var(--dim)">${modelAbbr(j.configModel)}·配</span>`;
+      else modelHtml = '<span title="未指定，继承全局默认模型" style="color:var(--dim)">默认</span>';
       html += `<tr class="${cls}">
         <td><strong>${j.name}</strong></td>
         <td><span style="font-size:11px;color:var(--dim)">${j.agentName||AGENT_CRON_NAMES[j.agentId]||j.agentId||'—'}</span></td>
@@ -814,9 +819,10 @@ async function fetchCron() {
         <td>${tsToTime(j.lastRunAtMs)}</td>
         <td>${statusHtml}</td>
         <td>${tsToTime(j.nextRunAtMs)}</td>
+        <td style="font-size:11px">${modelHtml}</td>
       </tr>`;
     }
-    document.getElementById('cronOpenclawBody').innerHTML = html || '<tr><td colspan="7" class="empty-msg">无定时任务</td></tr>';
+    document.getElementById('cronOpenclawBody').innerHTML = html || '<tr><td colspan="8" class="empty-msg">无定时任务</td></tr>';
 
     // Crontab table (合并后的，无注释行，调度中文，命令折叠)
     html = '';

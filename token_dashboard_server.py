@@ -409,6 +409,54 @@ def _read_session_transcript(session_id, agent_id):
         pass
     return seq
 
+def _cron_job_recent_model(job_id, agent_id):
+    """cron job 最近一次运行的实际模型：从最新 run session（agent:{aid}:cron:{jobId}:run:%）
+    的 transcript 提取（session 元数据的 model 是配置值，不可信）；无 run 记录时 fallback 父 session。
+    独立 TTL 缓存（复用 _dist_cache_lock/_dist_cache，key 前缀区分）。返回模型字符串或 None。"""
+    if not job_id or not agent_id:
+        return None
+    cache_key = 'cronmodel|' + agent_id + '|' + job_id
+    now = time.time()
+    with _dist_cache_lock:
+        c = _dist_cache.get(cache_key)
+        if c and now - c[0] < _DIST_CACHE_TTL:
+            return c[1]
+    db_path = os.path.join(AGENTS_DIR, agent_id, 'agent', 'openclaw-agent.sqlite')
+    sid = None
+    try:
+        if os.path.isfile(db_path):
+            import sqlite3
+            conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            try:
+                cur = conn.execute(
+                    'SELECT session_id FROM sessions WHERE session_key LIKE ? ORDER BY updated_at DESC LIMIT 1',
+                    (f'agent:{agent_id}:cron:{job_id}:run:%',))
+                row = cur.fetchone()
+                if not row:
+                    # 从未跑过（或旧版在父 session 跑）：fallback 父 session
+                    cur = conn.execute(
+                        'SELECT session_id FROM sessions WHERE session_key = ? LIMIT 1',
+                        (f'agent:{agent_id}:cron:{job_id}',))
+                    row = cur.fetchone()
+                sid = row[0] if row else None
+            finally:
+                conn.close()
+    except Exception:
+        return None
+    model = None
+    if sid:
+        seq = _read_session_transcript(sid, agent_id)
+        if seq:
+            model = seq[-1][0]  # transcript 按时间正序，最后一条即最新实际调用
+    with _dist_cache_lock:
+        if len(_dist_cache) >= _DIST_CACHE_MAX:
+            sorted_keys = sorted(_dist_cache.keys(), key=lambda k: _dist_cache[k][0])
+            for k in sorted_keys[:16]:
+                _dist_cache.pop(k, None)
+        _dist_cache[cache_key] = (now, model)
+    return model
+
+
 def _recent_model_dist(session_id, agent_id, n=_DIST_SAMPLE_N, extra_session_ids=None):
     """读最近 N 条 assistant 消息的实际 model/provider，返回分布 + 最后一条 + 时间戳。带 10s 缓存 + LRU 上限。
     合并主 session + extra（subagent）session 的 transcript，按时间统一排序后取最近 N 条。
@@ -1436,6 +1484,9 @@ def _get_openclaw_cron():
                     'nextRunAtMs': state.get('nextRunAtMs'),
                     'consecutiveErrors': state.get('consecutiveErrors', 0),
                     'lastDurationMs': state.get('lastDurationMs'),
+                    # 模型两口径（2026-08-29 新增）：configModel=payload 配置值；lastModel=最近一次 run 的实际调用模型
+                    'configModel': (item.get('payload') or {}).get('model') or '' if isinstance(item.get('payload'), dict) else '',
+                    'lastModel': _cron_job_recent_model(item.get('id', ''), agent_id),
                 })
             return jobs
         except Exception:
