@@ -1321,6 +1321,11 @@ DEFAULT_SYSTEM_TASKS = [
     # 由 Gateway 派生执行 git_backup.sh；本扫描器按设计边界排除一切 Gateway 派生进程
     # （见 _gateway_derived_pids 注释），此条目自上线起永远匹配不到，看板恒显「暂无运行记录」。
     # 其真实运行状态在 /cron 定时任务总览页正常展示（sqlite 实证 8-27 06:28 ok delivered）。
+    # 2026-08-31 登记「国学bot服务」：launchd 常驻服务 com.openclaw.guoxue-bot（KeepAlive），
+    # 每周重启后被 launchd 重新拉起的前 30 分钟会被未识别栏误抓（跑超 30 分钟才被常驻排除规则过滤）。
+    # match 双关键字：中文路径段最精确；bot/bot_server.py 为 ASCII 兜底（全机器唯一，无同名冲突），
+    # 防 ps 输出环境变化导致中文匹配失效。项目目录现为 桐姐玄学项目（原「国学运势顾问V3」仅剩 data 残留）。
+    {'name': '国学bot服务', 'owner': '基围虾/运维', 'period': '常驻（launchd）', 'match': ['桐姐玄学项目/生产-TGBot/bot/bot_server.py', 'bot/bot_server.py']},
 ]
 
 def _load_system_task_defs():
