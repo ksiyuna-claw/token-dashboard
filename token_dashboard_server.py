@@ -66,7 +66,8 @@ def _get_jwt_secret():
     global _JWT_SECRET
     if _JWT_SECRET is None:
         if _AUTH_PASS:
-            _JWT_SECRET = _AUTH_PASS.encode('utf-8')
+            # R2（issue-0235第2轮）：PBKDF2派生独立JWT密钥，不再用登录密码原文。副作用：密钥变更后现存JWT全部失效，用户需重新登录一次
+            _JWT_SECRET = hashlib.pbkdf2_hmac('sha256', _AUTH_PASS.encode('utf-8'), b'token-dashboard-jwt', 100000)
         else:
             _JWT_SECRET = b'token-dashboard-fallback-secret'
     return _JWT_SECRET
@@ -957,9 +958,14 @@ def _get_cached_sessions():
         return data
     except Exception as e:
         # 返回旧缓存（如果有）或空数据
+        # issue-0235（2026-09-03）：静默回退曾致看板定格22:10-22:19零迹可查（模型路由v2施工期网关繁忙、
+        # openclaw sessions子进程超时，except不打日志=排查无入口）。补日志：缓存年龄+异常摘要。
         with _sessions_lock:
             if _sessions_cache['data'] is not None:
+                stale_age = time.time() - _sessions_cache['ts']
+                logging.warning(f'[CACHE] sessions CLI失败，回退旧缓存（已陈旧{stale_age:.0f}s）: {type(e).__name__}: {e}')
                 return _sessions_cache['data']
+            logging.error(f'[CACHE] sessions CLI失败且无旧缓存: {type(e).__name__}: {e}')
             return {'sessions': [], 'error': str(e)}
 
 
@@ -1899,15 +1905,18 @@ class H(http.server.SimpleHTTPRequestHandler):
             params = parse_qs(body)
             user = params.get('username', [''])[0]
             passwd = params.get('password', [''])[0]
-            if user == _AUTH_USER and passwd == _AUTH_PASS:
+            # R1（issue-0235第2轮）：常量时间比较，防时序侧信道
+            if hmac.compare_digest(user.encode('utf-8'), _AUTH_USER.encode('utf-8')) and hmac.compare_digest(passwd.encode('utf-8'), _AUTH_PASS.encode('utf-8')):
                 token = _create_session(user)
                 remember = 'remember' in params
                 self.send_response(302)
                 self.send_header('Location', '/')
+                # R3（issue-0235第2轮）：经Cloudflare Tunnel（HTTPS）访问时Cookie加Secure；本地http不加（无条件加会使127.0.0.1登录失效）
+                _secure = '; Secure' if (self.headers.get('X-Forwarded-Proto', '') == 'https' or self.headers.get('CF-Connecting-IP')) else ''
                 if remember:
-                    self.send_header('Set-Cookie', f'td_session={token}; Max-Age={_SESSION_MAX_AGE}; Path=/; SameSite=Lax; HttpOnly')
+                    self.send_header('Set-Cookie', f'td_session={token}; Max-Age={_SESSION_MAX_AGE}; Path=/; SameSite=Lax; HttpOnly{_secure}')
                 else:
-                    self.send_header('Set-Cookie', f'td_session={token}; Path=/; SameSite=Lax; HttpOnly')
+                    self.send_header('Set-Cookie', f'td_session={token}; Path=/; SameSite=Lax; HttpOnly{_secure}')
                 self.end_headers()
             else:
                 # 登录失败，返回登录页+错误提示
@@ -1946,7 +1955,9 @@ class H(http.server.SimpleHTTPRequestHandler):
         if self.path == '/logout':
             self.send_response(302)
             self.send_header('Location', '/login')
-            self.send_header('Set-Cookie', 'td_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax')
+            # R3同口径：隧道访问时清除Cookie也带Secure
+            _secure = '; Secure' if (self.headers.get('X-Forwarded-Proto', '') == 'https' or self.headers.get('CF-Connecting-IP')) else ''
+            self.send_header('Set-Cookie', f'td_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax{_secure}')
             self.end_headers()
             return
         # 其他路由需要认证

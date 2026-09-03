@@ -466,3 +466,17 @@ ageMs=167829ms（判 waiting，完全复现事故场景）；修复后 spawn 测
 **决策来源**：匡书记指令
 
 **执行人**：基围虾（CTO）
+
+## 2026-09-03 安全加固三连（issue-0235 对焦虾第1轮历史欠账清偿）— 基围虾
+
+**改动**（token_dashboard_server.py）：
+1. **R1 密码比较常量时间化**：do_POST 登录校验 `==` 改 `hmac.compare_digest`（用户名+密码双字段），防时序侧信道
+2. **R2 JWT 密钥 PBKDF2 派生**：`_JWT_SECRET` 由密码原文改为 `hashlib.pbkdf2_hmac('sha256', 密码, b'token-dashboard-jwt', 100000)`
+   - ⚠️ **副作用**：本次部署（2026-09-03 22:5x）后所有现存登录态失效，各用户需重新登录一次（一次性代价）
+3. **R3 Cookie 动态 Secure**：登录/登出 Set-Cookie 检测 `X-Forwarded-Proto: https` 或 `CF-Connecting-IP`（Cloudflare Tunnel 特征）时追加 `; Secure`；本地 http://127.0.0.1:18888 不加——对焦虾特别标注禁止一刀切（会使本地登录失效）
+
+**恢复方法**：git 回滚本次改动即可；注意 R2 回滚后 JWT 密钥还原，同样会触发一次全员重新登录
+
+**决策来源**：对焦虾第 1 轮审核红色项（v5 报告 2026-07-22 Y1-Y3 欠账升级，规则"欠账不消不得 pass"）+ CEO 预授权「red 则按流程修复重审」
+
+**执行人**：基围虾（CTO）
