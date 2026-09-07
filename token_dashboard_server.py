@@ -690,6 +690,23 @@ CRON_PURPOSE = {
     '[手动停用] shanbei-daily-quant-lesson': '量化看板 · 扇贝每日量化课（历史停用）',
 }
 
+def _cron_purpose_fill(name, enabled=True):
+    """动态用途补全（2026-09-07 方案①）：静态字典 miss 时按 job 名前缀规则生成。
+    背景：CRON_PURPOSE 静态字典在 job 新增/改名后无人同步会大面积 miss（08-27 教训），
+    规则型 job（heartbeat-*/skill-collection-review-*）改用前缀规则动态生成，零维护。"""
+    if name.startswith('skill-collection-review-'):
+        return '系统自动 · Skill Workshop每周收藏集检查（轻量秒级，几乎零token）'
+    if name.startswith('heartbeat-'):
+        aid = name[len('heartbeat-'):]
+        aname = AGENT_NAMES.get(aid, aid)
+        if name == 'heartbeat-jiweixia':
+            base = '✅ iso模式（09-07启用）：隔离会话+轻上下文，token预计降90%+'
+            return base if enabled else base + ' · 已禁用'
+        return f'心跳monitor job（{aname}）· {"启用" if enabled else "已禁用"}'
+    if 'secrets注入探针' in name:
+        return '安全 · secrets注入探针（issue-0226 历史验证用，已停用）'
+    return ''
+
 # 所有 agent ID（用于遍历 cron）
 ALL_AGENTS = ['main', 'jiweixia', 'caoxia', 'pipixia', 'banjiexia', 'duijiaoxia', 'shanbei', 'hailuo', 'xiaohexia', 'haixing', 'haima', 'yoooclaw']
 
@@ -711,8 +728,59 @@ AGENT_NAMES = {
 
 CRONTAB_PURPOSE = {
     # 死代码已移除（2026-06-24 对焦虾审计 P1）：原空 dict 无实际用途
-    # 保留结构供将来扩展，/cron 端点通过 _get_crontab() 的 if/elif 匹配
+    # 保留结构供将来扩展，/cron 端点通过 _crontab_purpose() 的 if/elif 匹配
 }
+
+def _crontab_purpose(full_cmd, line=''):
+    """crontab 命令关键词 → 用途映射（2026-09-07 从 _get_crontab 抽取：活跃行与停用注释行共用一套）"""
+    import re as _re_purpose
+    if 'twitter_monitor' in full_cmd:
+        if 'elonmusk' in full_cmd or 'realdonald' in full_cmd:
+            return '[量化看板] Twitter KOL 核心账号监控（Musk/Trump）'
+        else:
+            return '[量化看板] Twitter KOL 扩展账号监控（Saylor/Vitalik/Armstrong）'
+    elif 'econ_monitor' in full_cmd:
+        return '[量化看板] 经济日历事件检查'
+    elif 'price_collector' in full_cmd:
+        return '[量化看板] 加密货币价格采集'
+    elif 'health_monitor' in full_cmd:
+        return '[量化看板] 信号系统健康监控'
+    elif 'signal_tracker' in full_cmd:
+        return '[量化看板] 交易信号追踪'
+    elif 'health_check.py' in full_cmd:
+        return '[虾厂运维] 系统健康巡检（LLM/Gateway/代理/磁盘）'
+    elif 'cron_delivery_snapshot' in full_cmd:
+        return '[虾厂运维] cron投递状态快照（7天滚动日志）'
+    elif 'tg_deadletter_resend' in full_cmd:
+        return '[虾厂运维] TG死信队列自动重发（每分钟）'
+    elif 'clean_workspace_tmp' in full_cmd:
+        return '[虾厂运维] workspace tmp 目录自动清理'
+    elif 'econ_result_analyzer' in full_cmd:
+        # 按调度小时字段区分：13点跑=美盘8:30数据，18点跑=美盘14:00数据（修原 '13:' 死匹配）
+        m_hour = _re_purpose.search(r'\s\d{1,2}\s+(\d{1,2})\s+\*\s+\*', line)
+        if m_hour and m_hour.group(1) == '13':
+            return '[量化看板] 经济数据自动分析（美盘 8:30 数据）'
+        else:
+            return '[量化看板] 经济数据自动分析（美盘 14:00 数据）'
+    elif 'daily_content' in full_cmd or 'daily_content.py' in full_cmd:
+        return '[国学运势] 每日运势内容生成'
+    elif 'haixing_site_monitor' in full_cmd or ('healthcheck.py' in full_cmd and 'ai影视' in full_cmd):
+        return '[AI影视] 网站健康检查（自动检测+重启+告警）'
+    elif 'data_collector.py' in full_cmd and 'ai影视' in full_cmd:
+        return '[AI影视] 每日数据采集+AI质检（比赛/工具/资讯）'
+    elif 'email_monitor' in full_cmd:
+        return '[Token看板] 邮件监听（新邮件推送TG）'
+    elif 'gateway_restart' in full_cmd:
+        return '[虾厂运维] Gateway 定时重启（每天04:00，释放V8堆碎片+session缓存）'
+    elif 'cloud_monitor' in full_cmd:
+        return '[聚光萤] 云端服务监控（每30分钟，异常时TG告警）'
+    elif 'backup.sh' in full_cmd or 'zhitai' in full_cmd:
+        return '[虾厂运维] 智泰硬盘全量备份（每天06:40，成功/失败TG推送）'
+    elif 'gateway_log_rotate' in full_cmd:
+        return '[虾厂运维] Gateway 日志轮转（每小时25分，防日志膨胀）'
+    elif 'du_snapshot' in full_cmd:
+        return '[虾厂运维] 全厂du磁盘快照（每天07:30，存储卫生治理M3，2026-08-30上线）'
+    return ''
 
 @cached(30)
 def _get_system_health():
@@ -1486,7 +1554,8 @@ def _get_openclaw_cron():
                     'name': name,
                     'agentId': item.get('agentId', agent_id),
                     'agentName': AGENT_NAMES.get(agent_id, agent_id),
-                    'purpose': CRON_PURPOSE.get(name, ''),
+                    # 用途：静态字典优先，miss 时走前缀规则动态补全（2026-09-07，覆盖25条空缺）
+                    'purpose': CRON_PURPOSE.get(name, '') or _cron_purpose_fill(name, item.get('enabled', True)),
                     'enabled': item.get('enabled', True),
                     'schedule': expr,
                     'scheduleHuman': human,
@@ -1586,7 +1655,12 @@ def _cron_to_chinese(schedule):
 
 @cached(60)
 def _get_crontab():
-    """获取系统 crontab，合并注释和任务行"""
+    """获取系统 crontab，合并注释和任务行。
+    2026-09-07 方案B：注释行中带 [停用YYYYMMDD...]/[暂停YYYYMMDD...] 标记的原 cron 行
+    解析为已停用条目（enabled=False，保留 schedule/purpose/停用日期/原因），历史可追溯。"""
+    import re as _re_dis
+    # 匹配：# [停用2026-08-22 余额不足520cr] */20 * * * * cmd... / # [暂停20260828 项目暂停] 0 8 * * * cmd...
+    marker_re = _re_dis.compile(r'^#\s*\[(停用|暂停)\s*(\d{4})-?(\d{2})-?(\d{2})\s*([^\]]*)\]\s*(.+)$')
     try:
         r = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=5)
         if r.returncode != 0:
@@ -1603,6 +1677,26 @@ def _get_crontab():
             if '=' in first and not line.startswith('#'):
                 continue
             if line.startswith('#'):
+                # 方案B：停用/暂停标记行 → 已停用条目（灰条展示，不入 comments）
+                m = marker_re.match(line)
+                if m:
+                    action, y, mo, d, reason, cron_part = m.groups()
+                    parts = cron_part.split(None, 5)
+                    if len(parts) >= 6:
+                        schedule = ' '.join(parts[:5])
+                        full_cmd = cron_part[len(schedule):].strip().lower()
+                        entries.append({
+                            'schedule': schedule,
+                            'scheduleHuman': _cron_to_chinese(schedule),
+                            'command': parts[5][:120],
+                            'purpose': _crontab_purpose(full_cmd, line) or '已停用（用途未标注）',
+                            'comment': '',
+                            'enabled': False,
+                            'disabledAction': action,
+                            'disabledDate': f'{y}-{mo}-{d}',
+                            'disabledReason': reason.strip(),
+                        })
+                    continue
                 comment_text = line[2:].strip()[:80]
                 comments.append(comment_text)
                 continue
@@ -1612,51 +1706,9 @@ def _get_crontab():
                 continue
             schedule = ' '.join(parts[:5])
             command = parts[5][:120]
-            # 匹配用途和注释
-            purpose = ''
+            # 匹配用途和注释（2026-09-07 抽取为 _crontab_purpose，与停用行共用）
             full_cmd = ' '.join(parts[5:]).lower()
-            if 'twitter_monitor' in full_cmd:
-                if 'elonmusk' in full_cmd or 'realDonald' in full_cmd:
-                    purpose = '[量化看板] Twitter KOL 核心账号监控（Musk/Trump）'
-                else:
-                    purpose = '[量化看板] Twitter KOL 扩展账号监控（Saylor/Vitalik/Armstrong）'
-            elif 'econ_monitor' in full_cmd:
-                purpose = '[量化看板] 经济日历事件检查'
-            elif 'price_collector' in full_cmd:
-                purpose = '[量化看板] 加密货币价格采集'
-            elif 'health_monitor' in full_cmd:
-                purpose = '[量化看板] 信号系统健康监控'
-            elif 'signal_tracker' in full_cmd:
-                purpose = '[量化看板] 交易信号追踪'
-            elif 'health_check.py' in full_cmd:
-                purpose = '[虾厂运维] 系统健康巡检（LLM/Gateway/代理/磁盘）'
-            elif 'cron_delivery_snapshot' in full_cmd:
-                purpose = '[虾厂运维] cron投递状态快照（7天滚动日志）'
-            elif 'tg_deadletter_resend' in full_cmd:
-                purpose = '[虾厂运维] TG死信队列自动重发（每分钟）'
-            elif 'clean_workspace_tmp' in full_cmd:
-                purpose = '[虾厂运维] workspace tmp 目录自动清理'
-            elif 'econ_result_analyzer' in full_cmd:
-                if '13:' in line:
-                    purpose = '[量化看板] 经济数据自动分析（美盘 8:30 数据）'
-                else:
-                    purpose = '[量化看板] 经济数据自动分析（美盘 14:00 数据）'
-            elif 'daily_content' in full_cmd or 'daily_content.py' in full_cmd:
-                purpose = '[国学运势] 每日运势内容生成'
-            elif 'haixing_site_monitor' in full_cmd or ('healthcheck.py' in full_cmd and 'ai影视' in full_cmd):
-                purpose = '[AI影视] 网站健康检查（自动检测+重启+告警）'
-            elif 'data_collector.py' in full_cmd and 'ai影视' in full_cmd:
-                purpose = '[AI影视] 每日数据采集+AI质检（比赛/工具/资讯）'
-            elif 'email_monitor' in full_cmd:
-                purpose = '[Token看板] 邮件监听（新邮件推送TG）'
-            elif 'gateway_restart' in full_cmd:
-                purpose = '[虾厂运维] Gateway 定时重启（每天04:00，释放V8堆碎片+session缓存）'
-            elif 'cloud_monitor' in full_cmd:
-                purpose = '[聚光萤] 云端服务监控（每30分钟，异常时TG告警）'
-            elif 'backup.sh' in full_cmd or 'zhitai' in full_cmd:
-                purpose = '[虾厂运维] 智泰硬盘全量备份（每天06:40，成功/失败TG推送）'
-            elif 'gateway_log_rotate' in full_cmd:
-                purpose = '[虾厂运维] Gateway 日志轮转（每小时25分，防日志膨胀）'
+            purpose = _crontab_purpose(full_cmd, line)
             # 找对应注释
             comment = ''
             for c in comments:

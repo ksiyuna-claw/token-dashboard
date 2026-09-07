@@ -84,6 +84,20 @@
   .cron-status-unknown { color: var(--dim); }
   .cron-row-error { background: rgba(248,81,73,0.08); }
   .cron-row-disabled { opacity: 0.4; }
+  /* 2026-09-07 定时任务层折叠 + 停用条目统一样式 */
+  .cron-fold { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; background: var(--card); overflow: hidden; }
+  .cron-fold > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; color: var(--fg); user-select: none; }
+  .cron-fold > summary::-webkit-details-marker { display: none; }
+  .cron-fold > summary:hover { background: rgba(88,166,255,0.06); }
+  .cron-fold .fold-arrow { display: inline-block; transition: transform .15s; color: var(--dim); font-size: 10px; }
+  .cron-fold[open] > summary .fold-arrow { transform: rotate(90deg); }
+  .cron-fold .fold-count { font-size: 12px; font-weight: normal; color: var(--dim); margin-left: auto; text-align: right; }
+  .cron-fold .fold-body { padding: 10px 14px 6px; border-top: 1px solid var(--border); }
+  .dis-toggle td { cursor: pointer; background: rgba(139,148,158,0.08); color: var(--dim); font-size: 12px; user-select: none; }
+  .dis-toggle td:hover { background: rgba(139,148,158,0.16); }
+  .dis-arrow { display: inline-block; transition: transform .15s; font-size: 9px; margin-right: 6px; }
+  tr.dis-row { background: rgba(139,148,158,0.05); }
+  tr.dis-row td { color: var(--dim); }
   .cron-row-comment { opacity: 0.4; font-style: italic; }
   /* Agent status cards - unified */
   .agent-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
@@ -172,9 +186,18 @@
 <div class="section" id="cronSection">
   <div class="section-title">⏱ 定时任务</div>
   <div class="cron-subtitle" id="cronSubtitle">正在获取...</div>
-  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">📋 OpenClaw 定时任务</div><div class="cron-table"><table><thead><tr><th>任务名</th><th>Agent</th><th>用途</th><th>周期</th><th>上次执行</th><th>状态</th><th>下次执行</th><th>模型</th></tr></thead><tbody id="cronOpenclawBody"><tr><td colspan="8" class="loading">正在获取...</td></tr></tbody></table></div></div>
-  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">⚙️ 系统 Crontab</div><div class="cron-table"><table><thead><tr><th>用途</th><th>周期</th><th>命令 <small style="color:var(--dim)">（点击展开）</small></th></tr></thead><tbody id="cronCrontabBody"><tr><td colspan="3" class="loading">正在获取...</td></tr></tbody></table></div></div>
-  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🖥️ 系统服务</div><div class="cron-table"><table><thead><tr><th>服务名</th><th>用途</th><th>运行方式</th><th>开机启动</th><th>状态</th></tr></thead><tbody id="cronLaunchBody"><tr><td colspan="5" class="loading">正在获取...</td></tr></tbody></table></div></div>
+  <details class="cron-fold" id="foldOpenclaw">
+    <summary><span class="fold-arrow">▶</span>📋 OpenClaw 定时任务<span class="fold-count" id="sumOpenclaw">…</span></summary>
+    <div class="fold-body"><div class="cron-table"><table><thead><tr><th>任务名</th><th>Agent</th><th>用途</th><th>周期</th><th>上次执行</th><th>状态</th><th>下次执行</th><th>模型</th></tr></thead><tbody id="cronOpenclawBody"><tr><td colspan="8" class="loading">正在获取...</td></tr></tbody></table></div></div>
+  </details>
+  <details class="cron-fold" id="foldCrontab">
+    <summary><span class="fold-arrow">▶</span>⚙️ 系统 Crontab<span class="fold-count" id="sumCrontab">…</span></summary>
+    <div class="fold-body"><div class="cron-table"><table><thead><tr><th>用途</th><th>周期</th><th>命令 <small style="color:var(--dim)">（点击展开）</small></th></tr></thead><tbody id="cronCrontabBody"><tr><td colspan="3" class="loading">正在获取...</td></tr></tbody></table></div></div>
+  </details>
+  <details class="cron-fold" id="foldLaunch">
+    <summary><span class="fold-arrow">▶</span>🖥️ 系统服务<span class="fold-count" id="sumLaunch">…</span></summary>
+    <div class="fold-body"><div class="cron-table"><table><thead><tr><th>服务名</th><th>用途</th><th>运行方式</th><th>开机启动</th><th>状态</th></tr></thead><tbody id="cronLaunchBody"><tr><td colspan="5" class="loading">正在获取...</td></tr></tbody></table></div></div>
+  </details>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🧠 Gateway 健康</div><div id="gatewayHealthBox" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim)">加载中...</div></div>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">📦 Hermes 网关健康</div><div id="hermesHealthBox" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim)">加载中...</div></div>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🔄 Web前端轮询</div><div class="cron-table"><table><thead><tr><th>页面</th><th>刷新周期</th><th>说明</th></tr></thead><tbody>
@@ -183,7 +206,10 @@
   <tr><td>🦐 Token看板</td><td>每60秒</td><td>模型供应商额度轮询</td></tr>
   <tr><td>🦐 Token看板</td><td>每5分钟</td><td>员工会话 + 定时任务列表刷新</td></tr>
   </tbody></table></div></div>
-  <div class="cron-table" id="heartbeatTableWrap" style="display:none"><table><thead><tr><th>虾</th><th>心跳周期</th><th>投递目标</th><th>状态</th></tr></thead><tbody id="heartbeatBody"></tbody></table></div>
+  <details class="cron-fold" id="heartbeatTableWrap" style="display:none">
+    <summary><span class="fold-arrow">▶</span>🫀 心跳配置<span class="fold-count" id="sumHeartbeat">…</span></summary>
+    <div class="fold-body"><div class="cron-table"><table><thead><tr><th>虾</th><th>心跳周期</th><th>投递目标</th><th>状态</th></tr></thead><tbody id="heartbeatBody"></tbody></table></div></div>
+  </details>
 </div>
 
 <div class="section">
@@ -792,16 +818,53 @@ function humanPeriod(expr, tz) {
   return `每天 ${h}:${m.padStart(2,'0')}`;
 }
 
+// ── 停用组折叠（2026-09-07 方案②/③）：状态跨5分钟轮询保持，不因刷新弹回 ──
+const _disOpen = { openclaw: false, crontab: false, launch: false };
+function _cap(layer) { return layer.charAt(0).toUpperCase() + layer.slice(1); }
+function disBodyId(layer) {
+  return layer === 'openclaw' ? 'cronOpenclawBody' : layer === 'crontab' ? 'cronCrontabBody' : 'cronLaunchBody';
+}
+function toggleDis(layer) {
+  _disOpen[layer] = !_disOpen[layer];
+  applyDisState(layer);
+}
+function applyDisState(layer) {
+  const tbody = document.getElementById(disBodyId(layer));
+  if (!tbody) return;
+  const open = _disOpen[layer];
+  const arrow = document.getElementById('disArrow' + _cap(layer));
+  if (arrow) arrow.style.transform = open ? 'rotate(90deg)' : '';
+  tbody.querySelectorAll('.dis-row').forEach(tr => { tr.style.display = open ? '' : 'none'; });
+}
+function disToggleRow(layer, colspan, count) {
+  return `<tr class="dis-toggle"><td colspan="${colspan}" onclick="toggleDis('${layer}')"><span class="dis-arrow" id="disArrow${_cap(layer)}">▶</span>已停用 (${count})<span style="font-weight:normal;margin-left:8px">点击展开/收起</span></td></tr>`;
+}
 async function fetchCron() {
   try {
     const r = await fetch('/cron-json');
     const d = await r.json();
-    document.getElementById('cronSubtitle').textContent = `${d.openclawCron.length} 个定时任务 · ${d.crontab.filter(c=>c.enabled).length} 条 crontab · ${d.launchAgents.length} 个系统服务`;
+    const ocAll = d.openclawCron || [];
+    const ocAct = ocAll.filter(j => j.enabled);
+    const ocDis = ocAll.filter(j => !j.enabled);
+    const errN = ocAll.filter(j => j.consecutiveErrors >= 2).length;
+    const ctAll = d.crontab || [];
+    const ctAct = ctAll.filter(c => c.enabled);
+    const ctDis = ctAll.filter(c => !c.enabled);
+    const laAll = d.launchAgents || [];
+    const laOn = laAll.filter(a => a.status === 'running' || a.status === 'loaded');
+    const laStop = laAll.filter(a => a.status === 'stopped');
+    document.getElementById('cronSubtitle').textContent = `OpenClaw ${ocAct.length} 启用/${ocDis.length} 停用 · Crontab ${ctAct.length} 活跃/${ctDis.length} 停用 · 服务 ${laOn.length} 在役/${laStop.length} 停止`;
 
-    // OpenClaw Cron table
+    // 各层折叠摘要（2026-09-07 方案③：默认视图短，只看计数+异常，点开看明细）
+    const setSum = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+    setSum('sumOpenclaw', `${ocAct.length} 启用 · ${ocDis.length} 停用` + (errN > 0 ? ` · <span style="color:var(--red);font-weight:700">❌${errN} 异常</span>` : ' · ✅无异常'));
+    setSum('sumCrontab', `${ctAct.length} 活跃 · ${ctDis.length} 停用`);
+    setSum('sumLaunch', `${laOn.length} 在役 · ${laStop.length} 停止`);
+
+    // OpenClaw Cron 表：活跃行 + 已停用折叠组（disabled job 统一停用态样式）
     let html = '';
-    for (const j of d.openclawCron) {
-      const cls = j.consecutiveErrors >= 2 ? 'cron-row-error' : !j.enabled ? 'cron-row-disabled' : '';
+    for (const j of ocAct) {
+      const cls = j.consecutiveErrors >= 2 ? 'cron-row-error' : '';
       let statusHtml;
       if (j.lastRunStatus === 'ok') statusHtml = '<span class="cron-status-ok">✅</span>';
       else if (j.lastRunStatus === 'error') statusHtml = '<span class="cron-status-error">❌ ' + (j.consecutiveErrors||0) + '次</span>';
@@ -822,12 +885,27 @@ async function fetchCron() {
         <td style="font-size:11px">${modelHtml}</td>
       </tr>`;
     }
+    if (ocDis.length > 0) {
+      html += disToggleRow('openclaw', 8, ocDis.length);
+      for (const j of ocDis) {
+        html += `<tr class="dis-row" data-layer="openclaw" style="display:none">
+        <td><span style="text-decoration:line-through">${j.name}</span></td>
+        <td><span style="font-size:11px">${j.agentName||AGENT_CRON_NAMES[j.agentId]||j.agentId||'—'}</span></td>
+        <td style="font-size:11px;max-width:180px">${j.purpose||'未标注'}</td>
+        <td>${j.scheduleHuman||humanPeriod(j.schedule,j.tz)}</td>
+        <td>${tsToTime(j.lastRunAtMs)}</td>
+        <td>⏸ 已停用</td>
+        <td>—</td>
+        <td style="font-size:11px">—</td>
+      </tr>`;
+      }
+    }
     document.getElementById('cronOpenclawBody').innerHTML = html || '<tr><td colspan="8" class="empty-msg">无定时任务</td></tr>';
+    applyDisState('openclaw');
 
-    // Crontab table (合并后的，无注释行，调度中文，命令折叠)
+    // Crontab 表：活跃行 + 已停用折叠组（注释行停用条目：保留 schedule/purpose/停用日期/原因）
     html = '';
-    for (const c of d.crontab) {
-      if (!c.enabled) continue;
+    for (const c of ctAct) {
       const purpose = c.purpose || '未标注';
       const period = c.scheduleHuman || c.schedule;
       const cmd = c.command || '';
@@ -839,15 +917,29 @@ async function fetchCron() {
         <td style="font-size:11px;color:var(--dim)"><details><summary style="cursor:pointer;color:var(--dim);font-size:10px">展开</summary><code style="font-size:10px;word-break:break-all">${cmd}</code></details></td>
       </tr>`;
     }
+    if (ctDis.length > 0) {
+      html += disToggleRow('crontab', 3, ctDis.length);
+      for (const c of ctDis) {
+        const purpose = c.purpose || '未标注';
+        const period = c.scheduleHuman || c.schedule;
+        const cmd = c.command || '';
+        const disInfo = `🚫 ${c.disabledAction || '停用'}于 ${c.disabledDate || '?'}` + (c.disabledReason ? ` · ${c.disabledReason}` : '');
+        html += `<tr class="dis-row" data-layer="crontab" style="display:none">
+        <td>${purpose}<div style="font-size:10px;margin-top:2px">${disInfo}</div></td>
+        <td>${period}</td>
+        <td style="font-size:11px;color:var(--dim)"><details><summary style="cursor:pointer;font-size:10px">展开</summary><code style="font-size:10px;word-break:break-all">${cmd}</code></details></td>
+      </tr>`;
+      }
+    }
     document.getElementById('cronCrontabBody').innerHTML = html || '<tr><td colspan="3" class="empty-msg">无 crontab</td></tr>';
+    applyDisState('crontab');
 
-    // LaunchAgent table
+    // LaunchAgent 表：running/loaded 在役行 + stopped 收进已停用折叠组（三层停用态样式统一）
     html = '';
-    for (const a of d.launchAgents) {
+    for (const a of laOn) {
       let statusHtml;
       if (a.status === 'running') statusHtml = '<span style="color:var(--green)">● 运行中</span>';
-      else if (a.status === 'loaded') statusHtml = '<span style="color:var(--yellow)">◐ 已加载</span>';
-      else statusHtml = '<span style="color:var(--red)">○ 已停止</span>';
+      else statusHtml = '<span style="color:var(--yellow)">◐ 已加载</span>';
       html += `<tr>
         <td><strong>${a.name}</strong></td>
         <td style="font-size:11px;color:var(--dim);max-width:200px">${a.purpose||'未标注'}</td>
@@ -856,15 +948,30 @@ async function fetchCron() {
         <td>${statusHtml}</td>
       </tr>`;
     }
-    document.getElementById('cronLaunchBody').innerHTML = html || '<tr><td colspan="4" class="empty-msg">无系统服务</td></tr>';
+    if (laStop.length > 0) {
+      html += disToggleRow('launch', 5, laStop.length);
+      for (const a of laStop) {
+        html += `<tr class="dis-row" data-layer="launch" style="display:none">
+        <td><span style="text-decoration:line-through">${a.name}</span></td>
+        <td style="font-size:11px;max-width:200px">${a.purpose||'未标注'}</td>
+        <td style="font-size:12px">${a.runMode||'—'}</td>
+        <td>${a.runAtLoad ? '✅' : '—'}</td>
+        <td>○ 已停止</td>
+      </tr>`;
+      }
+    }
+    document.getElementById('cronLaunchBody').innerHTML = html || '<tr><td colspan="5" class="empty-msg">无系统服务</td></tr>';
+    applyDisState('launch');
 
-    // Heartbeat table
+    // Heartbeat table（第四层，有数据才显示）
     const heartbeats = d.heartbeats || [];
     const hbWrap = document.getElementById('heartbeatTableWrap');
     if (heartbeats.length > 0) {
       hbWrap.style.display = '';
       let hbHtml = '';
+      let hbOn = 0;
       for (const h of heartbeats) {
+        if (h.enabled) hbOn++;
         const statusHtml = h.enabled ? '<span class="cron-status-ok">● 启用</span>' : '<span class="cron-status-unknown">○ 关闭</span>';
         hbHtml += `<tr>
           <td><strong>${h.agentName||h.agentId}</strong></td>
@@ -874,6 +981,7 @@ async function fetchCron() {
         </tr>`;
       }
       document.getElementById('heartbeatBody').innerHTML = hbHtml;
+      setSum('sumHeartbeat', `${hbOn} 启用 · ${heartbeats.length - hbOn} 关闭`);
     }
   } catch(e) {
     document.getElementById('cronSubtitle').textContent = '获取失败: ' + e.message;
