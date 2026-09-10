@@ -1,5 +1,37 @@
 # Token Dashboard 变更日志
 
+### 2026-09-11 (#12) — 系统性维修：R1/R2 确认bug + Y1-Y11 风险处置 + B1-B7 优化（基围虾 / CEO方案亲撰·匡书记拍板）
+
+**背景**：0911 只读审查实测实锤两处确认 bug 同根因——OpenClaw 8.2 升级删掉 `sessions` 表后，
+server.py 两处 sqlite 查询必抛 no such table 且被裸 except 静默吞掉：R1 使 issue-0183 的
+sqlite 真源覆盖自 8.2 起完全失效（issue-0295 9-7 复发直接根因）；R2 使定时任务总览模型列
+自 8.2 起恒显配置值。方案：`tickets/0911-看板系统性维修/01_方案.md`（CEO 亲撰，L0 通过 0红3黄）。
+
+**变更内容**（`token_dashboard_server.py` + `templates/token_dashboard.html`）：
+
+1. **R1**：`_refresh_updated_at_from_sqlite` 换 `session_windows` 表，字段选
+   `COALESCE(transcript_updated_at, updated_at)`（transcript 写入时间与 0183 语义完全对口，
+   实测运行中 age<1s）；吞错改 warning（per-agent 限流 5min）
+2. **R2+B1**：`_cron_job_recent_model` 换 `session_windows` 表，直接取自带 `model` 列
+   （实测真值），model 为空才回退 transcript_events；失败打日志
+3. **Y1** WS 重连 sync 补 ok 检查（失败响应不再清空活动状态）
+4. **Y3** `_agent_active_runs` 改 sessionKey 维度（并发会话不再互相清标记），消费端聚合回 agentId
+5. **Y4** transcript 读失败/旧 jsonl 回退：补日志 + stale 标志透传前端「⏳旧」角标
+6. **Y5** sessions 缓存回退旧数据时响应带 `_stale`/`_staleAgeSec`，界面显示「数据滞后」角标
+7. **Y6** WS token 每次重连重读（轮换后不再永久失联）；无 token 不再 abort 线程
+8. **Y7** 新增 `_is_gateway_cmd()` 词级统一口径，修复 PID 子串误配
+9. **Y8** 快照写入补 `updatedAt`（修裁剪排序定时炸弹）
+10. **Y9** 内存看门狗改 ps 当前 RSS（弃 ru_maxrss 历史峰值语义）
+11. **Y11** 前端 4 处插值补 `mEsc` 转义；**Y10** 0.0.0.0 暴露按方案明示不修仅记录
+12. **B2-B7**：ps 快照加 rss 列三处复用；cron 查询加 @cached(120)；额度轮询文案修正；
+    模型分布缓存 key 降维（集合hash）；WS 错误限流按类型分桶；sqlite3 提模块级
+
+**验证**（02_验证记录.md 全量落盘）：金丝雀全过——kickstart 重启后 18888 即时恢复；
+模型列 11/41 job 显真值（含配置≠实际对照样例）；本任务运行中 age=22s 持续跟进=R1 生效实锤；
+看门狗无异常；Y2 实测成立记录关闭（sessions.list 不含 subagent hasActiveRun，sqlite 兜底链已验证复活）。
+
+**次日 04:00 网关重启窗口**：观察 Y1 修复效果（reconnect sync 日志），CEO 跟到底。
+
 ### 2026-08-15 (#11) — 修复 subagent updatedAt 冻结导致看板误判「不在工作」（issue-0183）（基围虾 / 匡书记指令）
 
 **背景**：2026-08-15 12:08 CEO spawn 基围虾两个并行任务，任务真实执行中（sqlite transcript

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """虾厂 Token 看板 HTTP 服务"""
-import http.server, json, subprocess, os, time, urllib.request, urllib.error, threading, uuid, logging, logging.handlers, gc, resource, functools, plistlib, hmac, hashlib, base64
+import http.server, json, subprocess, os, time, urllib.request, urllib.error, threading, uuid, logging, logging.handlers, gc, resource, functools, plistlib, hmac, hashlib, base64, sqlite3  # B7(2026-09-11): sqlite3提模块级，原函数内重复import在循环调用下纯浪费
 
 # ── Auth 配置（JWT 无状态认证）─────────
 _AUTH_ENV_PATH = os.path.join(os.path.expanduser('~'), '.openclaw/workspace/ai_workspace/projects/2026-06-04-量化信息看板/.env')
@@ -196,23 +196,39 @@ _MEM_GC_THRESHOLD = 400 * 1024 * 1024   # 400MB 触发 gc.collect()
 _MEM_KILL_THRESHOLD = 800 * 1024 * 1024  # 800MB 自杀（launchd 会拉新进程）
 
 def _memory_watchdog_loop():
-    """后台线程：定期检查 RSS，超阈值则 gc 或自杀\n    RSS 硬限 1GB 在 plist 里设了但 launchd 可能未生效（kickstart 没重读 plist），\n    所以这里做应用层防线。"""
+    """后台线程：定期检查 RSS，超阈值则 gc 或自杀
+    RSS 硬限 1GB 在 plist 里设了但 launchd 可能未生效（kickstart 没重读 plist），
+    所以这里做应用层防线。
+    Y9(2026-09-11)：改用 ps 当前 RSS（复用 _ps_snapshot 共享快照），替代 ru_maxrss。
+    原实现用 ru_maxrss（进程生命周期历史峰值）当当前值：峰值冲高后读数永不下降，
+    >400MB 分支每次 gc 后照样报高读数刷无效 warning；一旦历史峰值超 800MB，
+    看门狗会每 60s 自杀一次（launchd 拉新进程后才恢复）。"""
     while True:
         time.sleep(_MEM_WATCH_INTERVAL)
         try:
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            if os.uname().sysname == 'Darwin':
-                rss = rss  # macOS 单位已是 bytes
-            else:
-                rss *= 1024  # Linux 单位是 KB
+            rss = None
+            _mypid = os.getpid()
+            for pid, _ppid, _et, rss_kb, _cmd in _ps_snapshot():
+                if pid == _mypid:
+                    rss = rss_kb * 1024  # ps rss 单位 KB → bytes（与原 ru_maxrss macOS 单位一致）
+                    break
+            if rss is None:
+                # ps 快照异常时保守回退 ru_maxrss（历史峰值，偏高不偏低，安全侧）
+                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                if os.uname().sysname != 'Darwin':
+                    rss *= 1024  # Linux 单位是 KB
             if rss > _MEM_KILL_THRESHOLD:
                 logging.error(f'[MEM] RSS {rss//1024//1024}MB > {_MEM_KILL_THRESHOLD//1024//1024}MB, 自杀让 launchd 拉新进程')
                 os._exit(1)
             elif rss > _MEM_GC_THRESHOLD:
                 before = rss
                 gc.collect()
-                rss2 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                logging.warning(f'[MEM] GC: RSS {before//1024//1024}MB → {rss2//1024//1024}MB')
+                rss2 = None
+                for pid, _ppid, _et, rss_kb, _cmd in _ps_snapshot():
+                    if pid == os.getpid():
+                        rss2 = rss_kb * 1024
+                        break
+                logging.warning(f'[MEM] GC: RSS {before//1024//1024}MB → {(rss2 or before)//1024//1024}MB (当前值口径)')
         except Exception as e:
             logging.error(f'[MEM] watchdog error: {e}')
 
@@ -232,15 +248,16 @@ _console.setLevel(logging.WARNING)  # stderr→plist 日志只收 WARNING+，INF
 _console.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
 logger.addHandler(_console)
 
-# WS 错误风暴防护：60 秒内同类错误只报一次
-_last_ws_error_at = 0.0
+# WS 错误风暴防护：60 秒内同类型错误只报一次（B6 2026-09-11：按错误类型分桶限流，
+# 原全局单时间戳会让不同类型错误互相抑制，风暴时只有第一条可查）
+_last_ws_error_at = {}  # {error_type: last_log_ts}
 def _log_ws_error(e):
-    global _last_ws_error_at
+    _k = type(e).__name__
     now = time.time()
-    if now - _last_ws_error_at < 60:
+    if now - _last_ws_error_at.get(_k, 0) < 60:
         return
-    _last_ws_error_at = now
-    logging.warning(f'[WS] error (rate-limited 60s): {type(e).__name__}: {str(e)[:200]}')
+    _last_ws_error_at[_k] = now
+    logging.warning(f'[WS] error[{_k}] (rate-limited 60s/bucket): {type(e).__name__}: {str(e)[:200]}')
 
 # 海外 API 需要走代理
 _PROXY_HANDLER = urllib.request.ProxyHandler({
@@ -263,8 +280,9 @@ _sessions_lock = threading.Lock()
 # 当 WS 收到 agent 相关事件时，记录 agentId → 最后活动时间戳
 _agent_ws_activity = {}  # {agentId: last_activity_ms}
 # Gateway sessions.changed 事件的 hasActiveRun 字段 → 精确的"模型正在思考"信号
-# {agentId: True} 表示该 agent 当前有一个活跃的模型 run（从开始到回复结束）
-_agent_active_runs = {}  # {agentId: True}
+# Y3(2026-09-11)：改为 sessionKey 维度——按 agentId 存/删会把同 agent 并发 session 的
+# 标记互相覆盖/误清（主会话 run 结束 pop 掉还在跑的 subagent/cron 标记），消费端聚合回 agentId
+_agent_active_runs = {}  # {sessionKey: True}
 _ws_thread = None
 _ws_connected = False
 
@@ -340,15 +358,16 @@ def _parse_msg_ts(obj, msg):
     return None
 
 def _read_session_transcript(session_id, agent_id):
-    """读单个 session transcript 的 assistant 消息，返回 [(model, provider, ts), ...]
+    """读单个 session transcript 的 assistant 消息，返回 (seq, stale)：seq = [(model, provider, ts), ...]
     优先读 agent sqlite（beta.3+），fallback 读旧 .jsonl 文件。
-    """
+    Y4(2026-09-11)：返回值增加 stale 标志——sqlite 读失败或回退旧 jsonl（8.2 后只剩 .bak/.reset
+    远古快照）时 stale=True，调用方可标记「数据滞后」，不再无痕返回数周前的模型数据。"""
     seq = []
+    stale = False
     # --- Phase 1: 读 sqlite transcript_events（beta.3+） ---
     db_path = os.path.join(AGENTS_DIR, agent_id, 'agent', 'openclaw-agent.sqlite')
     try:
         if os.path.isfile(db_path):
-            import sqlite3
             conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             try:
                 cur = conn.execute(
@@ -371,9 +390,11 @@ def _read_session_transcript(session_id, agent_id):
             finally:
                 conn.close()
             if seq:
-                return seq  # sqlite 有数据，直接返回
-    except Exception:
-        pass
+                return seq, False  # sqlite 有数据，直接返回
+    except Exception as e:
+        # Y4：不再静默回退——sqlite 读失败（如 db 短暂锁住）时必须留日志，否则排查无入口
+        logging.warning(f'[TRANSCRIPT] sqlite读失败回退jsonl ({agent_id}/{str(session_id)[:8]}): {type(e).__name__}: {e}')
+        stale = True
     # --- Phase 2: fallback 读旧 .jsonl 文件（兼容旧数据） ---
     tdir = os.path.join(AGENTS_DIR, agent_id, 'sessions')
     try:
@@ -391,6 +412,10 @@ def _read_session_transcript(session_id, agent_id):
             bak.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             candidates = primary or archive or bak
             if candidates:
+                # Y4：命中归档/bak 文件 = 数据可能是远古快照，留日志 + 标 stale
+                if candidates[0] not in primary:
+                    logging.warning(f'[TRANSCRIPT] 回退旧jsonl快照 ({agent_id}/{str(session_id)[:8]}): {os.path.basename(candidates[0])} 数据可能滞后')
+                stale = True
                 with open(candidates[0]) as f:
                     for line in f:
                         line = line.strip()
@@ -408,7 +433,7 @@ def _read_session_transcript(session_id, agent_id):
                             seq.append((m, msg.get('provider', ''), _parse_msg_ts(obj, msg)))
     except Exception:
         pass
-    return seq
+    return seq, stale
 
 def _cron_job_recent_model(job_id, agent_id):
     """cron job 最近一次运行的实际模型：从最新 run session（agent:{aid}:cron:{jobId}:run:%）
@@ -424,31 +449,44 @@ def _cron_job_recent_model(job_id, agent_id):
             return c[1]
     db_path = os.path.join(AGENTS_DIR, agent_id, 'agent', 'openclaw-agent.sqlite')
     sid = None
+    win_model = None
     try:
         if os.path.isfile(db_path):
-            import sqlite3
             conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             try:
+                # R2修复(2026-09-11)：8.2 升级删掉 sessions 表，旧查询必抛 no such table 被
+                # 裸 except 吞掉 → lastModel 恒 None，模型列自 8.2 起一直显示配置值。换
+                # session_windows 表。B1优化：直接取该表自带的 model 列（实测有真值，如
+                # glm-5.3-flash/k3），省掉每 job 二次查 transcript_events；model 为空时才
+                # 回退老路径（transcript_events 提取），兼容未记录 model 的旧窗口。
                 cur = conn.execute(
-                    'SELECT session_id FROM sessions WHERE session_key LIKE ? ORDER BY updated_at DESC LIMIT 1',
+                    'SELECT session_id, model FROM session_windows WHERE session_key LIKE ? ORDER BY updated_at DESC LIMIT 1',
                     (f'agent:{agent_id}:cron:{job_id}:run:%',))
                 row = cur.fetchone()
                 if not row:
                     # 从未跑过（或旧版在父 session 跑）：fallback 父 session
                     cur = conn.execute(
-                        'SELECT session_id FROM sessions WHERE session_key = ? LIMIT 1',
+                        'SELECT session_id, model FROM session_windows WHERE session_key = ? LIMIT 1',
                         (f'agent:{agent_id}:cron:{job_id}',))
                     row = cur.fetchone()
-                sid = row[0] if row else None
+                if row:
+                    sid = row[0]
+                    win_model = row[1] or None
             finally:
                 conn.close()
-    except Exception:
+    except Exception as e:
+        # R2修复：失败不再静默——原裸 except 让「打开 sqlite+必败查询」每 60s 对每个 job 重复全套动作
+        logging.warning(f'[CRONMODEL] sqlite查模型失败 ({agent_id}/{job_id[:8]}): {type(e).__name__}: {e}')
         return None
-    model = None
-    if sid:
-        seq = _read_session_transcript(sid, agent_id)
-        if seq:
-            model = seq[-1][0]  # transcript 按时间正序，最后一条即最新实际调用
+    if win_model:
+        model = win_model  # B1：session_windows.model 列直接可用（实测真值），省二次查 transcript
+    else:
+        model = None
+        if sid:
+            # model 列为空（旧窗口未记录 model）：回退读 transcript_events 提取最后一条实际调用
+            seq, _stale = _read_session_transcript(sid, agent_id)
+            if seq:
+                model = seq[-1][0]  # transcript 按时间正序，最后一条即最新实际调用
     with _dist_cache_lock:
         if len(_dist_cache) >= _DIST_CACHE_MAX:
             sorted_keys = sorted(_dist_cache.keys(), key=lambda k: _dist_cache[k][0])
@@ -469,18 +507,25 @@ def _recent_model_dist(session_id, agent_id, n=_DIST_SAMPLE_N, extra_session_ids
     if not session_id or not agent_id:
         return empty
     now = time.time()
-    cache_key = session_id + '|subs:' + ','.join(sorted(extra_session_ids or []))
+    # B5(2026-09-11)：缓存 key 从「全量 subagent id 拼接」降维为「数量+集合hash」——
+    # subagent 集合每变一个 id 即 miss，最坏每 10s 每 agent 开 N 个 sqlite 连接；
+    # 降维后内容相同（不管 id 顺序/成员怎么变）只要集合一致就命中。
+    subs = sorted(set(extra_session_ids or []))
+    subs_h = hashlib.md5(('|'.join(subs)).encode()).hexdigest()[:12] if subs else ''
+    cache_key = session_id + f'|s{len(subs)}:{subs_h}'
     with _dist_cache_lock:
         c = _dist_cache.get(cache_key)
         if c and now - c[0] < _DIST_CACHE_TTL:
             return c[1]
     # 读主 session transcript
-    seq = _read_session_transcript(session_id, agent_id)
+    seq, seq_stale = _read_session_transcript(session_id, agent_id)
     # 合并 subagent session transcripts（把分身的模型调用纳入统计）
-    if extra_session_ids:
-        for sid in extra_session_ids:
+    if subs:
+        for sid in subs:
             if sid and sid != session_id:
-                seq.extend(_read_session_transcript(sid, agent_id))
+                _s, _st = _read_session_transcript(sid, agent_id)
+                seq.extend(_s)
+                seq_stale = seq_stale or _st
     # 按时间戳排序（主+子混合后统一排序），无时间戳的排最后
     seq.sort(key=lambda x: x[2] or 0)
     recent = seq[-n:]
@@ -500,40 +545,41 @@ def _recent_model_dist(session_id, agent_id, n=_DIST_SAMPLE_N, extra_session_ids
             'last': {'model': lm, 'provider': lp, 'ts': lts},
             'dist': dist,
             'sampled': len(recent),
+            'stale': seq_stale,  # Y4：数据来自旧 jsonl 回退时标滞后
         }
+    else:
+        payload['stale'] = seq_stale
     _dist_cache_put(cache_key, payload, now)
     return payload
 
+def _is_gateway_cmd(cmd):
+    """Gateway 进程命令行识别统一口径（Y7 2026-09-11）：
+    必须含 openclaw/dist/index.js 且 gateway 为独立词。
+    实测生产命令行为 `node .../openclaw/dist/index.js gateway --port 18789`。
+    原 _find_gateway_pids 用无尾空格的 ' gateway' 子串匹配，会误匹配命令行里
+    恰好引用了这两个字符串的巡检/grep 进程（审查实测误配），收紧到词级匹配。"""
+    return 'openclaw/dist/index.js' in cmd and (' gateway ' in cmd or cmd.rstrip().endswith(' gateway'))
+
 def _gateway_health():
-    """读 Gateway 进程 RSS + uptime + 下次 04:00 重启倒计时"""
-    import subprocess, time as _time, datetime
+    """读 Gateway 进程 RSS + uptime + 下次 04:00 重启倒计时
+    B2(2026-09-11)：复用 _ps_snapshot 共享快照（5s TTL），替代独立跑 ps——
+    原每 15s/客户端轮询各自 spawn 一次 ps 纯浪费；识别口径统一走 _is_gateway_cmd。"""
+    import datetime
     info = {'rss': None, 'rssMB': None, 'uptimeHours': None, 'nextRestartIn': None, 'pid': None}
     try:
-        out = subprocess.check_output(['ps', '-A', '-o', 'pid,rss,etime,command'], text=True)
-        for line in out.splitlines():
-            # 精确匹配 Gateway 进程：node + openclaw/dist/index.js + gateway
-            if 'openclaw/dist/index.js' in line and ' gateway ' in line and 'grep' not in line:
-                parts = line.split()
-                if len(parts) >= 3:
-                    info['pid'] = int(parts[0])
-                    info['rss'] = int(parts[1])
-                    info['rssMB'] = round(int(parts[1]) / 1024, 0)
-                    # 解析 etime（格式如 02-03:34:33 或 15:30:00）
-                    et = parts[2]
-                    if '-' in et:
-                        d, hms = et.split('-', 1)
-                        h, m, s = hms.split(':')
-                        info['uptimeHours'] = round(int(d) * 24 + int(h) + int(m) / 60, 1)
-                    else:
-                        parts2 = et.split(':')
-                        if len(parts2) == 3:
-                            info['uptimeHours'] = round(int(parts2[0]) + int(parts2[1]) / 60, 1)
-                    break
+        for pid, _ppid, et_sec, rss_kb, cmd in _ps_snapshot():
+            if _is_gateway_cmd(cmd) and 'grep' not in cmd:
+                info['pid'] = pid
+                info['rss'] = rss_kb
+                info['rssMB'] = round(rss_kb / 1024, 0)
+                if et_sec is not None:
+                    info['uptimeHours'] = round(et_sec / 3600, 1)
+                break
     except Exception:
         pass
     # 计算下次 04:00 重启倒计时
     try:
-        now_dt = _time.localtime()
+        now_dt = time.localtime()
         # 今天 04:00 或明天 04:00
         today_4 = datetime.datetime(now_dt.tm_year, now_dt.tm_mon, now_dt.tm_mday, 4, 0, 0)
         if now_dt.tm_hour >= 4:
@@ -928,6 +974,9 @@ def merge_with_snapshot(current_data):
         key = s.get('key', '')
         # 如果当前 totalTokens 有效（非 null/0），更新快照
         if s.get('totalTokens') is not None and s.get('totalTokens', 0) > 0:
+            # Y8(2026-09-11)：补存 updatedAt——_trim_snapshot_data 按 updatedAt 排序裁剪，
+            # 原本 6 字段不存 → 超过 500 条时排序恒为 0，裁剪退化成按插入序，可能裁掉活跃
+            # session 保留死 session（当前量级未触发，定时炸弹拆除）
             new_snap_sessions[key] = {
                 'inputTokens': s.get('inputTokens', 0),
                 'outputTokens': s.get('outputTokens', 0),
@@ -935,6 +984,7 @@ def merge_with_snapshot(current_data):
                 'model': s.get('model', '-'),
                 'modelProvider': s.get('modelProvider', '-'),
                 'contextTokens': s.get('contextTokens', 200000),
+                'updatedAt': s.get('updatedAt', 0),
             }
         elif key in snap_by_key:
             # 当前没数据，用快照补
@@ -953,8 +1003,10 @@ def merge_with_snapshot(current_data):
     return current_data
 
 
+_sqlite_warn_ts = {}  # {agentId: last_warn_ts} R1：sqlite 覆盖失败日志 per-agent 限流 5min
+
 def _refresh_updated_at_from_sqlite(data):
-    """issue-0183 修复：用 agent sqlite 的 sessions.updated_at 覆盖 CLI 的滞后 updatedAt。
+    """issue-0183 修复：用 agent sqlite 的 session_windows 时间戳覆盖 CLI 的滞后 updatedAt。
 
     根因（2026-08-15 实测验证）：
     - `openclaw sessions --json` 对 subagent session 返回的 updatedAt ≈ spawn 观察时刻
@@ -964,14 +1016,20 @@ def _refresh_updated_at_from_sqlite(data):
        12:10-12:31 持续有事件写入）；
     - 双信号同时失明 → 看板把正在跑子任务的 agent 判成 waiting/idle。
 
-    sqlite sessions.updated_at 是真实写入时间（运行中实测 age<1s），按 session_key
-    精确对应后取 max 覆盖 CLI 值。会话彻底结束后 sqlite updated_at 停止前进，
+    sqlite 时间戳是真实写入时间（运行中实测 age<1s），按 session_key
+    精确对应后取 max 覆盖 CLI 值。会话彻底结束后 sqlite 时间戳停止前进，
     不影响 idle/stale 判定。
+
+    R1修复(2026-09-11)：8.2 升级删掉 sessions 表（实测 12/12 agent 库均无），
+    旧查询每 15s 必抛 no such table 且被裸 except 静默吞掉 → 本修复自 8.2 起完全
+    失效（issue-0295 9-7 复发的直接根因）。换 session_windows 表：
+    - 字段选 COALESCE(transcript_updated_at, updated_at)：transcript_updated_at
+      是 transcript 真实写入时间（与 0183 语义完全对口，实测运行中 age<1s）；
+      可能为 NULL（刚建窗口还没写 transcript），退 updated_at（≈spawn 时刻，
+      覆盖也不出错）。纯用 updated_at 会把 status 等元数据变更时刻也当写入时刻，
+      语义偏差放不需要的语义进来。
+    - 吞错改 warning 日志（per-agent 限流 5min，12 agent×每 15s 全打会刷屏）。
     """
-    try:
-        import sqlite3
-    except ImportError:
-        return data
     per_agent_keys = {}
     for s in data.get('sessions', []):
         aid = s.get('agentId')
@@ -985,12 +1043,18 @@ def _refresh_updated_at_from_sqlite(data):
         try:
             conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=5)
             try:
-                # 可接受债务（issue-0183 对焦虾第2轮R2-1）：全表扫无 LIMIT/索引。sessions 为本地小表
-                # （仅元数据行，当前千行级），全表扫开销可忽略；若量级增长需加 LIMIT/索引。
-                rows = conn.execute('SELECT session_key, updated_at FROM sessions').fetchall()
+                # 可接受债务（issue-0183 对焦虾第2轮R2-1）：全表扫无 LIMIT/索引。session_windows
+                # 为本地小表（仅窗口元数据行，当前百行级），全表扫开销可忽略；若量级增长需加 LIMIT/索引。
+                rows = conn.execute(
+                    'SELECT session_key, COALESCE(transcript_updated_at, updated_at) FROM session_windows').fetchall()
             finally:
                 conn.close()
-        except Exception:
+        except Exception as e:
+            # R1修复：不再静默吞——每 agent 限流 5 分钟一条，保留排查入口
+            _last = _sqlite_warn_ts.get(aid, 0)
+            if time.time() - _last > 300:
+                _sqlite_warn_ts[aid] = time.time()
+                logging.warning(f'[SQLITE] session_windows 覆盖失败 ({aid}): {type(e).__name__}: {e}')
             continue
         for sk, upd in rows:
             s = keymap.get(sk)
@@ -1028,11 +1092,16 @@ def _get_cached_sessions():
         # 返回旧缓存（如果有）或空数据
         # issue-0235（2026-09-03）：静默回退曾致看板定格22:10-22:19零迹可查（模型路由v2施工期网关繁忙、
         # openclaw sessions子进程超时，except不打日志=排查无入口）。补日志：缓存年龄+异常摘要。
+        # Y5(2026-09-11)：回退旧缓存时在响应体顶层加 _stale/_staleAgeSec 字段——前端可见「数据滞后」
+        # 角标（0266 界面层复现路径的补口），不再无痕定格。浅拷贝顶层 dict 避免污染缓存本体。
         with _sessions_lock:
             if _sessions_cache['data'] is not None:
                 stale_age = time.time() - _sessions_cache['ts']
                 logging.warning(f'[CACHE] sessions CLI失败，回退旧缓存（已陈旧{stale_age:.0f}s）: {type(e).__name__}: {e}')
-                return _sessions_cache['data']
+                _d = dict(_sessions_cache['data'])
+                _d['_stale'] = True
+                _d['_staleAgeSec'] = int(stale_age)
+                return _d
             logging.error(f'[CACHE] sessions CLI失败且无旧缓存: {type(e).__name__}: {e}')
             return {'sessions': [], 'error': str(e)}
 
@@ -1060,14 +1129,17 @@ def _ws_listener_loop():
         global _ws_connected
         import websockets
 
-        token = _get_gateway_token()
-        if not token:
-            logging.error('[WS] no gateway token, aborting')
-            return
-
         ws_url = 'ws://127.0.0.1:18789/'
 
         while True:  # 外层重连循环
+            # Y6(2026-09-11)：token 每次重连重读——原只在线程启动时读一次，token 轮换后
+            # WS 永久失联（connect 永远 401，每 10s 空转重试，服务进程长期不重启则风险累积）。
+            # 无 token 时不再 abort 线程（原 return 后 WS 永久死掉），等 60s 重试等配置出现。
+            token = _get_gateway_token()
+            if not token:
+                logging.error('[WS] no gateway token yet, retry in 60s')
+                await asyncio.sleep(60)
+                continue
             try:
                 async with websockets.connect(ws_url, ping_interval=None, ping_timeout=None) as ws:
                     # 1. 接收 challenge nonce
@@ -1143,6 +1215,12 @@ def _ws_listener_loop():
                         msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
                         data = json.loads(msg)
                         if data.get('type') == 'res' and data.get('id') == sync_id:
+                            if not data.get('ok'):
+                                # Y1(2026-09-11)：sync 失败保留旧状态——原无 ok 检查，
+                                # 失败响应（result 为空）同样走到 clear → 活动状态归零。
+                                # 超时异常路径本来就不 clear（跳外层重连），但失败响应路径必须拦。
+                                logging.warning(f'[WS] reconnect sync not ok, keep old state: {str(data)[:200]}')
+                                break
                             sessions = data.get('result', {}).get('sessions', [])
                             _agent_active_runs.clear()
                             _agent_ws_activity.clear()
@@ -1151,10 +1229,11 @@ def _ws_listener_loop():
                                 if s.get('hasActiveRun'):
                                     sk = s.get('sessionKey', '')
                                     aid = _parse_agent_id_from_session_key(sk) or s.get('agentId', '')
+                                    if sk:
+                                        _agent_active_runs[sk] = True  # Y3: sessionKey 维度
                                     if aid:
-                                        _agent_active_runs[aid] = True
                                         _agent_ws_activity[aid] = now_ms_sync
-                            logging.info(f'[WS] reconnect sync: {len(_agent_active_runs)} active agents')
+                            logging.info(f'[WS] reconnect sync ok: {len(_agent_active_runs)} active session windows')
                             break
                         # 跳过插队消息
 
@@ -1191,16 +1270,23 @@ def _ws_listener_loop():
                                 if not agent_id:
                                     agent_id = payload.get('agentId', '')
                                 has_active_run = payload.get('hasActiveRun')
-                                if agent_id and has_active_run is not None:
+                                if has_active_run is not None and (session_key or agent_id):
                                     if has_active_run:
-                                        _agent_active_runs[agent_id] = True
-                                        _agent_ws_activity[agent_id] = now_ms
-                                        logging.info(f'[WS] sessions.changed → {agent_id} hasActiveRun={has_active_run} (processed OK)')
+                                        # Y3(2026-09-11)：run 标记改 sessionKey 维度——原按 agentId
+                                        # 存/删，主会话 run 结束会把同 agent 其他还在跑的
+                                        # session（cron/心跳/子代理）标记一并 pop → working→idle→working 抖动
+                                        if session_key:
+                                            _agent_active_runs[session_key] = True
+                                        if agent_id:
+                                            _agent_ws_activity[agent_id] = now_ms
+                                        logging.info(f'[WS] sessions.changed → {session_key or agent_id} hasActiveRun={has_active_run} (processed OK)')
                                     else:
-                                        # 模型 run 结束，清除活跃标记和 WS 活动时间戳
-                                        _agent_active_runs.pop(agent_id, None)
-                                        _agent_ws_activity.pop(agent_id, None)
-                                        logging.info(f'[WS] sessions.changed → {agent_id} hasActiveRun={has_active_run} (processed OK)')
+                                        # 只清本 session 的 run 标记；活动时间戳更新而非删除
+                                        # （run 结束也是一次活动，30s TTL 自然过期）
+                                        _agent_active_runs.pop(session_key, None)
+                                        if agent_id:
+                                            _agent_ws_activity[agent_id] = now_ms
+                                        logging.info(f'[WS] sessions.changed → {session_key or agent_id} hasActiveRun={has_active_run} (processed OK)')
                                 continue
 
                             # 其他非 health 事件都尝试提取 agentId
@@ -1252,21 +1338,22 @@ _ps_snapshot_cache = {'rows': None, 'ts': 0.0}
 _ps_snapshot_lock = threading.Lock()
 
 def _ps_snapshot():
-    """单次 `ps -A -o pid=,ppid=,etime=,command=` 快照（短TTL缓存，全模块共享）。
-    返回 [(pid, ppid, elapsed_sec_or_None, cmd)]，异常时返回 []。"""
+    """单次 `ps -A -o pid=,ppid=,etime=,rss=,command=` 快照（短TTL缓存，全模块共享）。
+    返回 [(pid, ppid, elapsed_sec_or_None, rss_kb, cmd)]，异常时返回 []。
+    2026-09-11 加 rss 列：Y9 内存看门狗改用 ps 当前 RSS + B2 _gateway_health 复用本快照。"""
     now = time.time()
     with _ps_snapshot_lock:
         if _ps_snapshot_cache['rows'] is not None and now - _ps_snapshot_cache['ts'] < _PS_SNAPSHOT_TTL:
             return _ps_snapshot_cache['rows']
     try:
-        r = subprocess.run(['ps', '-A', '-o', 'pid=,ppid=,etime=,command='],
+        r = subprocess.run(['ps', '-A', '-o', 'pid=,ppid=,etime=,rss=,command='],
                            capture_output=True, text=True, timeout=5)
         rows = []
         for line in r.stdout.split('\n'):
-            parts = line.strip().split(None, 3)
-            if len(parts) == 4:
+            parts = line.strip().split(None, 4)
+            if len(parts) == 5:
                 try:
-                    rows.append((int(parts[0]), int(parts[1]), _etime_to_sec(parts[2]), parts[3]))
+                    rows.append((int(parts[0]), int(parts[1]), _etime_to_sec(parts[2]), int(parts[3]), parts[4]))
                 except ValueError:
                     continue
         with _ps_snapshot_lock:
@@ -1292,11 +1379,11 @@ def _etime_to_sec(s):
 
 def _find_gateway_pids(rows=None):
     """从快照实时解析 Gateway PID 集合（绝不缓存结果）。
-    识别：命令行含 openclaw/dist/index.js + gateway（与 _gateway_health 同口径）"""
+    识别：统一走 _is_gateway_cmd（Y7 2026-09-11：与 _gateway_health 同口径，词级匹配）"""
     rows = rows if rows is not None else _ps_snapshot()
     pids = set()
-    for pid, _ppid, _et, cmd in rows:
-        if 'openclaw/dist/index.js' in cmd and ' gateway' in cmd:
+    for pid, _ppid, _et, _rss, cmd in rows:
+        if _is_gateway_cmd(cmd):
             pids.add(pid)
     return pids
 
@@ -1305,9 +1392,9 @@ def _gateway_derived_pids(rows, gateway_pids):
     单次快照内回溯，无逐级 subprocess 调用；链断（父进程已退出）按非衍生处理（安全侧）。"""
     if not gateway_pids:
         return set()
-    ppid_of = {pid: ppid for pid, ppid, _et, _cmd in rows}
+    ppid_of = {pid: ppid for pid, ppid, _et, _rss, _cmd in rows}
     derived = set()
-    for pid, ppid, _et, _cmd in rows:
+    for pid, ppid, _et, _rss, _cmd in rows:
         if pid in gateway_pids:
             continue
         cur, hops, seen = ppid, 0, set()
@@ -1356,7 +1443,7 @@ def _detect_active_process_agents():
             return set()
         derived = _gateway_derived_pids(rows, gw_pids)
         active = set()
-        for pid, ppid, _et, cmd in rows:
+        for pid, ppid, _et, _rss, cmd in rows:
             if pid not in derived:
                 continue  # 非 Gateway 衍生（cron/launchd/常驻服务）→ 不归因任何虾
             ll = cmd.lower()
@@ -1461,7 +1548,7 @@ def _sys_task_scan_once():
     running_now = {}
     for d in defs:
         procs = []
-        for pid, ppid, et, cmd in rows:
+        for pid, ppid, et, _rss, cmd in rows:
             if pid in derived or pid in matched_pids or pid in gw_pids:
                 continue
             if any(m in cmd for m in d['match']):
@@ -1473,7 +1560,7 @@ def _sys_task_scan_once():
     # 未识别兑底：非名单内、非Gateway衍生、含workspace路径的 python 定时进程（只显示不归因）
     # 排除常驻服务（跑超过30分钟的 python 服务不是定时任务，避免任务栏长期挂噪音）
     unknown = []
-    for pid, ppid, et, cmd in rows:
+    for pid, ppid, et, _rss, cmd in rows:
         if pid in derived or pid in matched_pids or pid in gw_pids:
             continue
         ll = cmd.lower()
@@ -1526,8 +1613,11 @@ def _sys_task_monitor_loop():
         time.sleep(_SYS_TASK_SCAN_INTERVAL)
 
 @cached(60)
+@cached(120)
 def _get_openclaw_cron():
-    """获取所有 agent 的 openclaw cron 汇总（并发遍历）"""
+    """获取所有 agent 的 openclaw cron 汇总（并发遍历）
+    B3(2026-09-11)：加 120s 缓存——原无缓存，每次前端 cron 轮询都并发 spawn 12 个 CLI
+    子进程（每个 timeout 15s）；降频后子进程量减半以上，lastModel 有独立 TTL 缓存不受影响。"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _fetch_one(agent_id):
@@ -2064,13 +2154,16 @@ class H(http.server.SimpleHTTPRequestHandler):
                 # 认为信号可能丢失，降级到其他检测方式
                 active_run_agents = set()
                 active_run_stale_ms = 2 * 60 * 1000  # 2分钟安全 TTL（issue-0123：事件丢失时减少恢复延迟）
-                for aid in list(_agent_active_runs.keys()):
-                    last_ts = _agent_ws_activity.get(aid, 0)
+                # Y3(2026-09-11)：_agent_active_runs 已改 sessionKey 维度，聚合回 agentId
+                # （该 agent 任一 session 窗口在跑 = working）
+                for sk in list(_agent_active_runs.keys()):
+                    _aid = _parse_agent_id_from_session_key(sk) or sk
+                    last_ts = _agent_ws_activity.get(_aid, 0)
                     if now - last_ts < active_run_stale_ms:
-                        active_run_agents.add(aid)
+                        active_run_agents.add(_aid)
                     else:
-                        # 超过5分钟没有刷新，清除可能泄漏的标记
-                        _agent_active_runs.pop(aid, None)
+                        # 超过2分钟没有刷新，清除可能泄漏的标记
+                        _agent_active_runs.pop(sk, None)
 
                 # === WS 实时活动检测：作为 hasActiveRun 的补充兜底 ===
                 # _agent_ws_activity 中有最近收到事件的 agentId → last_activity_ms
@@ -2183,12 +2276,14 @@ class H(http.server.SimpleHTTPRequestHandler):
                         'modelProvider': _provider,
                         'modelDist': _mdist['dist'],      # 最近 N 条分布 [{model,provider,count}...]
                         'modelLast': _mdist['last'],      # 最后一条 {model,provider,ts}
+                        'modelDistStale': _mdist.get('stale', False),  # Y4：数据来自旧 jsonl 回退时标滞后
                         'sessionCount': info['sessionCount'],
                         'subagentCount': info['subagentCount'],
                     })
                 agent_order = {aid: i for i, aid in enumerate(ALL_AGENTS)}
                 agents.sort(key=lambda a: agent_order.get(a['agentId'], 99))
-                body = json.dumps({'agents': agents, 'now': now, 'wsConnected': _ws_connected, 'activeRunAgents': list(_agent_active_runs.keys()), 'gatewayHealth': _gateway_health(), 'hermesHealth': _hermes_health()}).encode()
+                _active_run_agent_ids = sorted({(_parse_agent_id_from_session_key(sk) or sk) for sk in _agent_active_runs.keys()})
+                body = json.dumps({'agents': agents, 'now': now, 'wsConnected': _ws_connected, 'activeRunAgents': _active_run_agent_ids, 'gatewayHealth': _gateway_health(), 'hermesHealth': _hermes_health()}).encode()
             except Exception as e:
                 body = json.dumps({'error': str(e)}).encode()
             self.send_response(200)

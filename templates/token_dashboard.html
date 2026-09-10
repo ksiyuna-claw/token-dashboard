@@ -203,7 +203,7 @@
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🔄 Web前端轮询</div><div class="cron-table"><table><thead><tr><th>页面</th><th>刷新周期</th><th>说明</th></tr></thead><tbody>
   <tr><td>🦐 Token看板</td><td>每15秒</td><td>虾厂工作状态轮询（不消耗token）</td></tr>
   <tr><td>🦐 Token看板</td><td>每30秒</td><td>系统健康数据轮询</td></tr>
-  <tr><td>🦐 Token看板</td><td>每60秒</td><td>模型供应商额度轮询</td></tr>
+  <tr><td>🦐 Token看板</td><td>每5分钟</td><td>模型供应商额度轮询（随员工会话刷新触发，服务端额度缓存60s基本不命中）</td></tr>
   <tr><td>🦐 Token看板</td><td>每5分钟</td><td>员工会话 + 定时任务列表刷新</td></tr>
   </tbody></table></div></div>
   <details class="cron-fold" id="heartbeatTableWrap" style="display:none">
@@ -404,8 +404,11 @@ function renderModelArea(stat) {
     return `<div style="width:${w}%;background:${col}${sep}" title="${mEsc(segTitle)}"></div>`;
   }).join('');
   const bar = `<div class="ac-mbar">${segs}</div>`;
+  // Y4(2026-09-11)：数据来自旧 jsonl 回退（sqlite 读失败/归档快照）时加滞后角标，
+  // 不再无痕展示数周前的模型分布
+  const staleBadge = (stat && stat.modelDistStale) ? `<em style="font-style:normal;color:var(--dim);font-size:10px;margin-left:4px" title="sqlite 读失败或归档快照回退，数据可能滞后">⏳旧</em>` : '';
   // 时间戳已删除（最左 chip 即代表最新调用，时间信息冗余）
-  return `<div class="ac-model"><div class="ac-model-chips">${chips}</div>${bar}</div>`;
+  return `<div class="ac-model"><div class="ac-model-chips">${chips}${staleBadge}</div>${bar}</div>`;
 }
 
 function renderQuotaCard(name, subtitle, limits, level) {
@@ -563,6 +566,7 @@ async function fetchProviderQuotas() {
 }
 
 let _allSessions = [];
+let _windowStaleAge = null;  // Y5(2026-09-11)：服务端回退旧缓存的滞后秒数（null=数据新鲜）
 let _currentFilter = 'direct';
 let _categoryCounts = {};
 let _agentStatusMap = {}; // agentId → status info from /agent-status
@@ -580,6 +584,10 @@ async function fetchSessions() {
     const r = await fetch('/sessions-json');
     const d = await r.json();
     const all = d.sessions || [];
+
+    // Y5(2026-09-11)：服务端回退旧缓存时带 _stale/_staleAgeSec，界面显示「数据滞后」角标
+    // （0266 界面层复现路径的补口：网关长时间不可用时看板不再无痕定格）
+    _windowStaleAge = (d._stale && d._staleAgeSec != null) ? d._staleAgeSec : null;
 
     // 给每个 session 分类
     for (const s of all) {
@@ -634,7 +642,7 @@ function renderAgentCards() {
     filtered = _allSessions.filter(s => s._cat.id === _currentFilter);
   }
 
-  document.getElementById('sessionCount').textContent = `${filtered.length} / ${_allSessions.length} session`;
+  document.getElementById('sessionCount').textContent = `${filtered.length} / ${_allSessions.length} session` + (_windowStaleAge != null ? ` · ⏳数据滞后${_windowStaleAge < 90 ? Math.round(_windowStaleAge) + 's' : Math.round(_windowStaleAge / 60) + 'min'}` : '');
 
   let totalIn = 0, totalOut = 0;
 
@@ -704,7 +712,7 @@ function renderAgentCards() {
 
     html += `<div class="agent-card ${statusCls[st]||''}">
       <div class="ac-header"><span class="ac-name">${emoji} ${displayName} ${kindBadge}</span><span class="ac-status-icon">${statusIcon[st]||'❓'} <span style="font-size:10px;color:var(--dim)">${age}</span></span></div>
-      ${renderModelArea(stat) || `<div class="ac-row"><span class="ac-label">模型</span><span class="ac-val">${s.model||'-'} ${ptag}</span></div>`}
+      ${renderModelArea(stat) || `<div class="ac-row"><span class="ac-label">模型</span><span class="ac-val">${mEsc(s.model||'-')} ${ptag}</span></div>`}
       <div class="ac-row"><span class="ac-label">输入/输出</span><span class="ac-val">↓${fmt(s.inputTokens||0)} ↑${fmt(s.outputTokens||0)}</span></div>
       <div class="ac-row"><span class="ac-label">上下文</span><span class="ac-val">${cp}%</span></div>
       <div class="ac-ctx-bar"><div class="ac-ctx-fill" style="width:${cp}%;background:${c}"></div></div>
@@ -875,7 +883,7 @@ async function fetchCron() {
       else if (j.configModel) modelHtml = `<span title="${mEsc(j.configModel)}（配置，尚未运行过）" style="color:var(--dim)">${modelAbbr(j.configModel)}·配</span>`;
       else modelHtml = '<span title="未指定，继承全局默认模型" style="color:var(--dim)">默认</span>';
       html += `<tr class="${cls}">
-        <td><strong>${j.name}</strong></td>
+        <td><strong>${mEsc(j.name)}</strong></td>
         <td><span style="font-size:11px;color:var(--dim)">${j.agentName||AGENT_CRON_NAMES[j.agentId]||j.agentId||'—'}</span></td>
         <td style="font-size:11px;color:var(--dim);max-width:180px">${j.purpose||'未标注'}</td>
         <td>${j.scheduleHuman||humanPeriod(j.schedule,j.tz)}</td>
@@ -889,7 +897,7 @@ async function fetchCron() {
       html += disToggleRow('openclaw', 8, ocDis.length);
       for (const j of ocDis) {
         html += `<tr class="dis-row" data-layer="openclaw" style="display:none">
-        <td><span style="text-decoration:line-through">${j.name}</span></td>
+        <td><span style="text-decoration:line-through">${mEsc(j.name)}</span></td>
         <td><span style="font-size:11px">${j.agentName||AGENT_CRON_NAMES[j.agentId]||j.agentId||'—'}</span></td>
         <td style="font-size:11px;max-width:180px">${j.purpose||'未标注'}</td>
         <td>${j.scheduleHuman||humanPeriod(j.schedule,j.tz)}</td>
@@ -974,7 +982,7 @@ async function fetchCron() {
         if (h.enabled) hbOn++;
         const statusHtml = h.enabled ? '<span class="cron-status-ok">● 启用</span>' : '<span class="cron-status-unknown">○ 关闭</span>';
         hbHtml += `<tr>
-          <td><strong>${h.agentName||h.agentId}</strong></td>
+          <td><strong>${mEsc(h.agentName||h.agentId)}</strong></td>
           <td>${h.every||'?'}</td>
           <td>${h.target||'none'}</td>
           <td>${statusHtml}</td>
