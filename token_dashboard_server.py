@@ -720,15 +720,16 @@ def _get_providers():
 # ── 用途标注（服务/调度 → 所属项目）──────────────────────────
 # 2026-08-27 全量对齐 sqlite 实际 job 名（旧键名与现名不符致总览页用途列大面积"—"，匡书记报修）
 CRON_PURPOSE = {
-    'Git自动备份': '运维 · 虾厂Git自动备份（每天06:28，flash灰度中）',
+    'Git自动备份': '运维 · 虾厂Git自动备份（每天06:56，flash灰度中）',
     '凌晨巡检(06:00)': '运维 · 基围虾清晨系统巡检（quiet只报紧急异常）',
     '晚间巡检(21:15)': '运维 · 基围虾晚间综合巡检（当日全量汇报）',
     '看脸实验室-每日内容（皮皮虾）': '内容 · 看脸实验室每日内容生产（kimi/k3）',
     '看脸实验室-每周选题补充（皮皮虾）': '内容 · 看脸实验室每周选题池补充',
     '颜姐-每日内容卡片（皮皮虾）': '内容 · 颜姐日推卡片生成（v3.1换马kimi/k3）',
     '颜姐-周日复盘+选题（皮皮虾）': '内容 · 颜姐周日复盘与选题规划',
-    '颜姐-周日回流（皮皮虾）': '内容 · 颜姐账号周批回流（8-28拍板周批模式，周日07:30）',
+    '颜姐-周日回流（皮皮虾）': '内容 · 颜姐账号周批回流（8-28拍板周批模式，周日06:58）',
     '颜姐-每日快照（皮皮虾）': '数据 · 颜姐账号日频快照（停用待命，未来或恢复日频，issue-0157已收口）',
+    '颜姐日卡-兜底监控': '内容 · 皮皮虾日卡/看脸双任务兜底哨兵（v7，每天06:58）',
     '聚萤-月初财税提醒': '财税 · 聚萤月初财税提醒（每月1日）',
     '[手动停用] Token用量推送': '运维 · Token用量TG推送（历史停用，看板已替代）',
     '[手动停用] 每周前沿Agent研究扫描': 'AI研究 · Agent前沿周扫（历史停用，心跳方向3覆盖）',
@@ -800,7 +801,7 @@ def _crontab_purpose(full_cmd, line=''):
     elif 'tg_deadletter_resend' in full_cmd:
         return '[虾厂运维] TG死信队列自动重发（每分钟）'
     elif 'clean_workspace_tmp' in full_cmd:
-        return '[虾厂运维] workspace tmp 目录自动清理'
+        return '[虾厂运维] workspace tmp 目录自动清理（每天06:55）'
     elif 'econ_result_analyzer' in full_cmd:
         # 按调度小时字段区分：13点跑=美盘8:30数据，18点跑=美盘14:00数据（修原 '13:' 死匹配）
         m_hour = _re_purpose.search(r'\s\d{1,2}\s+(\d{1,2})\s+\*\s+\*', line)
@@ -821,11 +822,11 @@ def _crontab_purpose(full_cmd, line=''):
     elif 'cloud_monitor' in full_cmd:
         return '[聚光萤] 云端服务监控（每30分钟，异常时TG告警）'
     elif 'backup.sh' in full_cmd or 'zhitai' in full_cmd:
-        return '[虾厂运维] 智泰硬盘全量备份（每天06:40，成功/失败TG推送）'
+        return '[虾厂运维] 智泰硬盘全量备份（每天06:56，成功/失败TG推送）'
     elif 'gateway_log_rotate' in full_cmd:
         return '[虾厂运维] Gateway 日志轮转（每小时25分，防日志膨胀）'
     elif 'du_snapshot' in full_cmd:
-        return '[虾厂运维] 全厂du磁盘快照（每天07:30，存储卫生治理M3，2026-08-30上线）'
+        return '[虾厂运维] 全厂du磁盘快照（每天06:55，存储卫生治理M3，2026-08-30上线）'
     return ''
 
 @cached(30)
@@ -1476,7 +1477,7 @@ DEFAULT_SYSTEM_TASKS = [
     {'name': 'Twitter KOL监控', 'owner': '系统', 'period': '每20/30分钟', 'match': ['collectors.twitter_monitor']},
     {'name': '服务器巡检·健康巡检', 'owner': '基围虾/运维', 'period': '每15分钟', 'match': ['health_check.py']},
     {'name': '服务器巡检·日志轮转', 'owner': '基围虾/运维', 'period': '每小时25分', 'match': ['gateway_log_rotate.sh']},
-    {'name': '服务器巡检·tmp清理', 'owner': '基围虾/运维', 'period': '每日07:00', 'match': ['clean_workspace_tmp.py']},
+    {'name': '服务器巡检·tmp清理', 'owner': '基围虾/运维', 'period': '每日06:55', 'match': ['clean_workspace_tmp.py']},
     {'name': '邮件监控', 'owner': '系统', 'period': '每30分钟', 'match': ['email_monitor.py']},
     # 2026-08-27 移除「Git自动备份」条目：该任务已是 OpenClaw cron（agent_id=jiweixia），
     # 由 Gateway 派生执行 git_backup.sh；本扫描器按设计边界排除一切 Gateway 派生进程
