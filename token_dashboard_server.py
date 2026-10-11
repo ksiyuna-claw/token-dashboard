@@ -1688,6 +1688,10 @@ def _cron_expr_to_human(expr):
         # 处理 */x 格式
         if m.startswith('*/'):
             interval = m[2:]
+            if h != '*':
+                # 小时有限定：带上窗口（2026-10-11修：此前丢弃小时限定，*/5 5-6 * * * 被误显为「每 5 分钟」像全天跑）
+                hw = h.replace(',', '/')
+                return f'{hw}点内每 {interval} 分钟'
             return f'每 {interval} 分钟'
         if h.startswith('*/'):
             interval = h[2:]
