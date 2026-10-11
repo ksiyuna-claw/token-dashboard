@@ -332,7 +332,7 @@ const MODEL_COLORS = [
   { k: ['qwen', '千问', 'tongyi'], c: '#f0883e', bg: 'rgba(240,136,62,0.15)' },  // 橙
   /* 2026-07-23 MiniMax套餐到期下线，代码保留备用 */
   // { k: ['minimax'],              c: '#bc8cff', bg: 'rgba(188,140,255,0.15)' },  // 紫
-  { k: ['kimi', 'moonshot'],     c: '#ff69b4', bg: 'rgba(255,105,180,0.15)' },  // 粉
+  { k: ['kimi', 'moonshot', 'k3'], c: '#ff69b4', bg: 'rgba(255,105,180,0.15)' },  // 粉（2026-10-11 补 k3 短名：kimi/k3 不含 kimi 字样，此前落灰色兜底与 K2.7 一粉一灰像两家）
 ];
 const MODEL_COLOR_DEFAULT = { c: '#8b949e', bg: 'rgba(139,148,158,0.14)' };     // 灰兜底
 function colorForModel(model) {
@@ -352,6 +352,9 @@ function modelAbbr(model) {
   if (m.includes('qwen') || m.includes('千问') || m.includes('tongyi')) return 'QW';
   /* 2026-07-23 MiniMax套餐到期下线，代码保留备用 */
   // if (m.includes('minimax')) return 'MM';
+  /* 2026-10-11 匡书记反馈：kimi-for-coding 显示成 'Kimi' 与 K3 无法区分造成困扰 → 按版本号缩写 */
+  if (m.includes('k3')) return 'K3';
+  if (m.includes('k2') || m.includes('for-coding')) return 'K2.7'; // kimi-for-coding 本体不含 k2，需显式命中（模拟验证抓出）
   if (m.includes('kimi') || m.includes('moonshot')) return 'Kimi';
   if (m.includes('gpt')) return 'GPT';
   if (m.includes('claude')) return 'CL';
