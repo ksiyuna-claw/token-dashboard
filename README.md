@@ -1,89 +1,85 @@
-# 🦐 Token Dashboard
+# 🦐 Token Dashboard — 全厂AI运营监控面板
 
-OpenClaw 多 Agent 的 API 用量监控看板 + Telegram 定时推送。
+> 项目说明书（2026-10-11重写：原功能段严重过时且缺区块清单，导致维护者自己都误判过两次——本文件现按「第一信息源」标准维护，**任何功能变动当天必须同步本文件的功能全景段**，规矩同运维SOP「文档同步规矩」段）。
 
-## 功能
+**一句话定位**：OpenClaw全厂多Agent的用量与自动化监控面板——token消耗、供应商额度、邮箱、系统健康、全部定时任务，一个页面看全。
 
-- **Web 看板**：实时显示智谱（海外/国内）、DeepSeek 的配额使用情况 + 各 Agent 的 token 消耗
-- **TG 推送**：每 N 小时推送用量报告到 Telegram
-- **智能告警**：根据「消耗速度 vs 时间进度」判定安全/偏快/危险/已停
+## 访问入口
+
+| 入口 | 地址 | 说明 |
+|------|------|------|
+| 本机 | http://127.0.0.1:18888/ | launchd服务 `com.openclaw.token-dashboard`（KeepAlive常驻） |
+| 公网 | https://token-dashboard.crypto-signal.work/ | cloudflared `quant-dashboard` 隧道（与量化看板家族共用，配置在 `~/.cloudflared/config.yml`） |
+| 手机查数 | TG发「查token」 | 触发 `ai_workspace/scripts/token_usage_push.py` 推送（手动口令模式，无自动调度） |
+
+## 功能全景（页面7区块+额度告警逻辑，2026-10-11 curl实测+代码通读核实）
+
+| 区块 | 内容（代码实锤） | 数据源 |
+|------|------|--------|
+| 🦐 虾厂员工 | 12虾agent卡片（模型chips+工作状态动画光效）+7个tab：主会话/心跳/子代理/Slash/微信Bot/系统/全部 | `/agent-status`（15秒轮询）+ `/sessions-json` |
+| 📦 模型供应商额度 | 智谱国内/Kimi/DeepSeek/MiniMax 额度卡片（服务端额度缓存60s） | `/providers` 列表 + `/quota/<id>` 代理各家官方API（5分钟轮询） |
+| 📬 邮箱监控 | 未读邮件状态 | `email_monitor.py`（系统crontab每30分钟）写 `data/email_status.json` → `/email-status` |
+| 🩺 系统健康 | 6卡片：CPU/内存/Swap/磁盘/负载1m5m15m/CDP Chrome（含CDP异常警告条） | `/health-json`（30秒轮询） |
+| ⏱ **定时任务**（2026-09-07上线，四层折叠） | ① OpenClaw闹钟表：任务名/Agent/用途/周期/上次执行/状态/下次执行/模型（8列；用途列=静态字典+前缀规则动态生成零维护）② 系统crontab ③ LaunchAgent ④ 心跳表；**内嵌子块**：Gateway健康+Hermes网关健康+Web前端轮询说明表；另有独立总览页 `/cron` | `/cron-json` 读 `openclaw cron list` 等（5分钟轮询） |
+| 📊 总览 | 6卡片：员工总数/总Session/主会话/子代理/总输入Token/总输出Token | 前端聚合sessions数据 |
+| 🖥️ 系统任务 | 系统级任务卡片 | `/system-tasks`（15秒轮询） |
+
+**页面刷新机制**：虾厂状态+系统任务15秒 / 系统健康30秒 / 额度+会话+定时任务5分钟 / 邮箱2分钟（四档轮询，均不消耗token）
+
+**监控覆盖边界（设计如此，非遗漏）**：dashscope（阿里百炼）只跑ASR/声图不走LLM——不监控；火山ark推理key查不了余额——不监控；硅基流动旧余额端点已废弃——暂不监控。
 
 ## 架构
 
 ```
-token_dashboard_server.py   ← HTTP 服务 (端口 18888)，内嵌前端页面
-  ├── /quota-overseas     ← 代理智谱海外 API
-  ├── /quota-domestic     ← 代理智谱国内 API
-  ├── /quota-deepseek     ← 代理 DeepSeek API
-  ├── /quota-minimax      ← 代理 MiniMax API
-  ├── /quota-kimi         ← 代理 Kimi Coding Plan API
-  └── /sessions-json      ← 代理 openclaw sessions
+token_dashboard_server.py   ← HTTP服务 :18888（launchd常驻，项目目录内，2396行）
+全部端点（12个，2026-10-11代码实测）：
+  /                    ← 主页面（templates/token_dashboard.html，1170行）
+  /cron                ← 独立定时任务总览页（cron.html）
+  /login /logout       ← 登录/登出（公网访问鉴权）
+  /agent-status        ← 虾厂员工状态（15秒轮询）
+  /sessions-json       ← 会话数据（代理 openclaw sessions）
+  /providers           ← 供应商列表（按openclaw.json动态）
+  /quota/<id>          ← 各家额度代理
+  /cron-json           ← 定时任务四层数据（cron list+crontab -l+launchctl list+心跳）
+  /email-status        ← 邮箱监控状态
+  /system-tasks        ← 系统任务（15秒轮询）
+  /health-json         ← 系统健康（30秒轮询）
 
-本仓库只包含核心服务端。前端 HTML 和 TG 推送脚本请在部署时按需配置。
+token_usage_push.py        ← TG「查token」推送脚本（scripts/目录，手动口令触发）
+email_monitor.py           ← 邮件监听（crontab每30分钟）
+token_snapshot.json        ← 快照缓存（scripts/目录，断电恢复用）
 ```
 
-## 快速开始
+## 快速开始（本厂部署向）
 
-### 1. 准备配置文件
-
-```bash
-cp config.example.json config.json
-# 编辑 config.json，填入你的 API key
-```
-
-### 2. 启动看板
-
-```bash
-python3 token_dashboard_server.py
-# 浏览器访问 http://127.0.0.1:18888/
-```
-
-### 3. 配置定时推送
-
-TG 推送脚本不包含在本仓库中。请根据你的环境（systemd / launchctl / cron）自行配置定时调用推送脚本。
-
-## 配置说明
-
-`config.json` 结构：
-
-```json
-{
-  "zhipu": {
-    "overseas_key": "智谱海外(Coding Plan) API Key",
-    "domestic_key": "智谱国内 API Key"
-  },
-  "deepseek_key": "DeepSeek API Key",
-  "telegram": {
-    "bot_token": "Telegram Bot Token",
-    "chat_id": "接收推送的 Chat ID"
-  },
-  "work_dir": "openclaw scripts 目录，存放 snapshot 和 HTML"
-}
-```
+- 服务由 launchd 管理：`launchctl print gui/$(id -u)/com.openclaw.token-dashboard`
+- 重启服务：`launchctl kickstart -k gui/$(id -u)/com.openclaw.token-dashboard`
+- 日常运维操作/排障：见运维SOP（虾厂工作手册 → references/运维/Token看板系统运维_SOP.md）
 
 ## Provider 踩坑记录
 
 ### Kimi (Moonshot) Coding Plan 额度查询
-**2026-06-29 踩坑总结**
+**2026-06-29 踩坑总结**（🔴 2026-10-11注：这段是宝——当天有人重新挖此端点花了一小时，答案一直在这里）
 
 Kimi 有两套完全独立的 Key 体系，**不可混用**：
 
 | Key 类型 | 格式示例 | 用途 | 余额/额度查询端点 |
-|---------|---------|------|----------------|
+|---------|---------|------|------------------|
 | **Coding Plan Key** | `sk-kimi-...` (72字符) | Coding/对话/API调用 | `https://api.kimi.com/coding/v1/usages` |
 | **Open Platform Key** | `sk-Hik...` (48字符) | 普通API按量付费 | `https://api.moonshot.cn/v1/users/me/balance` |
 
 **关键坑点**：
-1. **余额端点必须用 Coding Plan Key**：`api.moonshot.cn/v1/users/me/balance` 返回的是普通Open Platform余额，Coding Plan用户永远是0
-2. **Coding Plan 额度端点**：`api.kimi.com/coding/v1/usages`，返回周额度（7天滚动）+ 5分钟频限
-3. **必须带 User-Agent**：`KimiCLI/1.6`，否则 401
-4. **代理配置**：`api.kimi.com` 也需要走代理（和 DeepSeek/MiniMax 一样）
+1. **余额端点必须用 Coding Plan Key**：`api.moonshot.cn` 返回的是普通Open Platform余额，Coding Plan用户永远是0/认证不通
+2. **Coding Plan 额度端点**：`api.kimi.com/coding/v1/usages`，返回周额度（7天滚动）+ 5分钟频限 + 加油包余额
+3. **历史坑：必须带 User-Agent `KimiCLI/1.6`，否则 401**（2026-10-11实测已放宽，裸curl可通；若再遇401先加UA）
+4. **代理配置**：`api.kimi.com` 需走代理（同 DeepSeek/MiniMax）
 
 **返回数据示例**：
 ```json
 {
-  "usage": {"limit": "100", "used": "1", "remaining": "99", "resetTime": "2026-07-06T06:44:44Z"},
-  "limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"}, "detail": {"limit": "100", "used": "6", "remaining": "94"}}]
+  "usage": {"limit": "100", "used": "22", "remaining": "78", "resetTime": "2026-10-14T00:35:40Z"},
+  "limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"}, "detail": {"limit": "100", "used": "7", "remaining": "93"}}],
+  "booster_wallet": {"...": "加油包余额"}
 }
 ```
 
@@ -125,6 +121,9 @@ Kimi 有两套完全独立的 Key 体系，**不可混用**：
 MIT
 
 ## 维护历史（重大维修记录）
+
+### 2026-10-11 文档双升级（匡书记口令「升级迭代一下sop和该项目readme」）
+**README重写为项目说明书**（原功能段停在远古版本只写智谱+DeepSeek，定位是模板化部署说明；当日因「定时任务板块存不存在」「Kimi可不可监控」连续误判——知识都在但埋在踩坑记录里、顶部概览从不更新）。同时**运维SOP联动升级**：立文档分工（README=功能第一信息源/SOP=只管操作排障）、架构图补9-07欠账（/cron-json+公网入口）、踩坑第9条（同型再犯复盘）、双同步规矩（功能变动当天README功能全景+SOP操作面任一不动=没同步）。
 
 ### 2026-09-11 系统性维修（工单 tickets/0911-看板系统性维修/，commit 53590ce，+252/-117）
 
