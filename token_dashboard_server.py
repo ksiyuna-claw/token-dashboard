@@ -2193,16 +2193,21 @@ class H(http.server.SimpleHTTPRequestHandler):
 
                 agent_info = {}
                 for aid in ALL_AGENTS:
-                    agent_info[aid] = {'updatedAt': 0, 'model': '-', 'sessionCount': 0, 'subagentCount': 0, 'subagentUpdatedAt': 0, 'subagentSessionIds': []}
+                    agent_info[aid] = {'updatedAt': 0, 'model': '-', 'sessionCount': 0, 'subagentCount': 0, 'subagentActiveCount': 0, 'subagentUpdatedAt': 0, 'subagentSessionIds': []}
                 for s in d.get('sessions', []):
                     aid = s.get('agentId', 'unknown')
                     if aid not in agent_info:
-                        agent_info[aid] = {'updatedAt': 0, 'model': '-', 'sessionCount': 0, 'subagentCount': 0, 'subagentUpdatedAt': 0, 'subagentSessionIds': []}
+                        agent_info[aid] = {'updatedAt': 0, 'model': '-', 'sessionCount': 0, 'subagentCount': 0, 'subagentActiveCount': 0, 'subagentUpdatedAt': 0, 'subagentSessionIds': []}
                     agent_info[aid]['sessionCount'] += 1
                     key = s.get('key', '')
                     updated = s.get('updatedAt', 0)
                     if ':subagent:' in key:
                         agent_info[aid]['subagentCount'] += 1
+                        # 1012工单（2026-10-12匡书记拍板修）：「N个分身在跑」误显历史会话——新增活跃计数
+                        # 双条件：status非终态 且 最近30分钟内有更新。单status不可靠：昨晚审核链留有
+                        # running僵尸会话（c944cc2b，11h无更新）；单时间窗不可靠：done后短暂窗口内会误数。
+                        if s.get('status') not in ('done', 'killed') and (now - updated) < 1800000:
+                            agent_info[aid]['subagentActiveCount'] += 1
                         _sub_sid = s.get('sessionId', '')
                         if _sub_sid:
                             agent_info[aid]['subagentSessionIds'].append(_sub_sid)
@@ -2285,6 +2290,7 @@ class H(http.server.SimpleHTTPRequestHandler):
                         'modelDistStale': _mdist.get('stale', False),  # Y4：数据来自旧 jsonl 回退时标滞后
                         'sessionCount': info['sessionCount'],
                         'subagentCount': info['subagentCount'],
+                        'subagentActiveCount': info['subagentActiveCount'],
                     })
                 agent_order = {aid: i for i, aid in enumerate(ALL_AGENTS)}
                 agents.sort(key=lambda a: agent_order.get(a['agentId'], 99))

@@ -690,6 +690,7 @@ function renderAgentCards() {
     const displayName = AGENT_NAMES[aid] || aid;
     const emoji = AGENT_EMOJI[aid] || '🤖';
     const subCount = stat.subagentCount || 0;
+    const subActive = stat.subagentActiveCount || 0;  // 1012工单：活跃分身数（status非终态且30分钟内有更新），「在跑」文案专用
     const age = stat.ageMs ? (stat.ageMs < 60000 ? Math.floor(stat.ageMs/1000)+'秒前' : stat.ageMs < 3600000 ? Math.floor(stat.ageMs/60000)+'分前' : Math.floor(stat.ageMs/3600000)+'时前') : '-';
 
     if (!s) {
@@ -700,7 +701,7 @@ function renderAgentCards() {
         <div class="ac-row"><span class="ac-label">活跃</span><span class="ac-val" style="color:var(--dim)">无活跃会话</span></div>
         <div class="ac-row"><span class="ac-label">上下文</span><span class="ac-val" style="color:var(--dim)">—</span></div>
         <div class="ac-ctx-bar"><div class="ac-ctx-fill" style="width:0%;background:var(--border)"></div></div>
-        ${subCount > 0 ? `<div class="ac-sub" style="color:var(--purple)">📎 ${subCount}个分身</div>` : ''}
+        ${subActive > 0 ? `<div class="ac-sub" style="color:var(--purple)">📎 ${subActive}个分身在跑</div>` : ''}
       </div>`;
       continue;
     }
@@ -719,7 +720,7 @@ function renderAgentCards() {
       <div class="ac-row"><span class="ac-label">输入/输出</span><span class="ac-val">↓${fmt(s.inputTokens||0)} ↑${fmt(s.outputTokens||0)}</span></div>
       <div class="ac-row"><span class="ac-label">上下文</span><span class="ac-val">${cp}%</span></div>
       <div class="ac-ctx-bar"><div class="ac-ctx-fill" style="width:${cp}%;background:${c}"></div></div>
-      ${subCount > 0 ? `<div class="ac-sub" style="color:var(--purple)">📎 ${subCount}个分身在跑</div>` : ''}
+      ${subActive > 0 ? `<div class="ac-sub" style="color:var(--purple)">📎 ${subActive}个分身在跑</div>` : ''}
     </div>`;
     totalIn += s.inputTokens || 0;
     totalOut += s.outputTokens || 0;
