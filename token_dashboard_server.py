@@ -594,16 +594,21 @@ def _gateway_health():
         pass
     return info
 
+_tg_warn_last = [0.0]  # TG状态读取失败日志限频戳（对焦虾第1轮建议项2：600s一条，防看板15s轮询刷屏）
+
 def _hermes_health():
     """Hermes 网关健康监测（2026-08-18 匡书记批准新增）
-    监测三层维持措施：进程存活+uptime、gateway.heartbeat 心跳年龄、watchdog 动作日志
+    监测四层维持措施：进程存活+uptime、gateway.heartbeat 心跳年龄、watchdog 动作日志、TG通道状态
+    2026-10-14 新增第4项TG通道状态：读 gateway_state.json 的 platforms.telegram（同源watchdog v5.2，看板管可见不管自愈）
     """
     import subprocess as _sp
+    import datetime as _dt
     hermes_home = os.path.join(os.path.expanduser('~'), '.hermes')
     info = {
         'running': False, 'pid': None, 'uptimeHours': None,
         'hbAgeSec': None, 'hbFresh': False,
         'watchdogLast': None, 'watchdogTriggered': False,
+        'tg_state': 'unknown', 'tg_state_age': None,  # 2026-10-14 TG通道状态，默认unknown（fail-safe）
         'note': '',
     }
     # 1. 进程存活 + uptime
@@ -652,6 +657,33 @@ def _hermes_health():
                 info['watchdogTriggered'] = True
     except Exception:
         pass
+    # 4. TG 通道状态（2026-10-14）：读 gateway_state.json 的 platforms.telegram
+    #    🔴 updated_at 是嵌套层字段（platforms.telegram.updated_at），非顶层——用错字段冻结检测永不触发
+    #    三态判定（后端判，前端纯展示；R1修复后对齐watchdog v5.2信号B语义——对焦虾第1轮审核）：
+    #    state==connected→connected（直接判健康不查age：updated_at是状态迁移时间戳，connected态不周期刷新，
+    #    长跑连接age必然>600s，若age优先会恒显frozen）；非connected且age>600s→frozen（阈值对齐watchdog
+    #    STALE_SECS=600，retrying/fatal冻结=handler真死）；非connected且age新鲜→retrying；文件缺失/解析失败→unknown
+    try:
+        gs_file = os.path.join(hermes_home, 'gateway_state.json')
+        with open(gs_file, encoding='utf-8') as f:
+            tg = (json.load(f).get('platforms') or {}).get('telegram') or {}
+        upd = _dt.datetime.fromisoformat(tg.get('updated_at', ''))
+        if upd.tzinfo is None:  # ISO8601可能无时区后缀，统一补UTC，防naive/aware混合TypeError
+            upd = upd.replace(tzinfo=_dt.timezone.utc)
+        tg_age = max(0, int((_dt.datetime.now(_dt.timezone.utc) - upd).total_seconds()))  # 时钟漂移防负数
+        if tg.get('state') == 'connected':
+            info['tg_state'] = 'connected'
+        elif tg_age > 600:
+            info['tg_state'] = 'frozen'
+        else:
+            info['tg_state'] = 'retrying'
+        info['tg_state_age'] = tg_age
+    except Exception:
+        info['tg_state'] = 'unknown'
+        info['tg_state_age'] = None
+        if time.time() - _tg_warn_last[0] > 600:  # 限频600s一条（对焦虾建议项2）
+            _tg_warn_last[0] = time.time()
+            logger.warning('gateway_state.json TG状态读取失败，tg_state=unknown', exc_info=True)
     return info
 
 def _last_actual_model(session_id, agent_id):
@@ -925,7 +957,7 @@ def _get_system_health():
 LAUNCH_PURPOSE = {
     'ai.openclaw.gateway': '虾厂核心 · OpenClaw Gateway 主进程',
     'ai.hermes.gateway': 'AI基础设施 · Hermes 知识映射 Gateway',
-    'ai.hermes.watchdog': 'AI基础设施 · Hermes 看门狗（每6h自愈：进程存活+心跳年龄检查）',
+    'ai.hermes.watchdog': 'AI基础设施 · Hermes 看门狗（30min 双信号自愈（进程+心跳+TG状态）+ TG 汇报）',
     'ai.hermes.cleanup-locks': 'AI基础设施 · Hermes 开机锁文件清理（防 PID 复用导致误锁）',
     'com.openclaw.token-dashboard': '运维 · Token看板 HTTP服务 (18888)',
     'com.openclaw.cloudflared': '运维 · Cloudflare Tunnel 外网穿透（token-dashboard.crypto-signal.work / quant-dashboard）',
