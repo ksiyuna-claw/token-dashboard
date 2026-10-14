@@ -165,6 +165,11 @@
   <div class="provider-grid" id="providerGrid"><div class="loading">正在获取...</div></div>
 </div>
 
+<div class="section" id="hermesSection">
+  <div class="section-title">📦 Hermes 网关健康</div>
+  <div class="card"><div id="hermesHealthBox" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim)">加载中...</div></div>
+</div>
+
 <div class="section" id="emailSection">
   <div class="section-title">📬 邮箱监控 <span id="emailSummary" style="font-size:12px;color:var(--dim);font-weight:normal;margin-left:8px"></span></div>
   <div class="card" id="emailCard"><div class="loading">正在获取...</div></div>
@@ -199,7 +204,6 @@
     <div class="fold-body"><div class="cron-table"><table><thead><tr><th>服务名</th><th>用途</th><th>运行方式</th><th>开机启动</th><th>状态</th></tr></thead><tbody id="cronLaunchBody"><tr><td colspan="5" class="loading">正在获取...</td></tr></tbody></table></div></div>
   </details>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🧠 Gateway 健康</div><div id="gatewayHealthBox" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim)">加载中...</div></div>
-  <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">📦 Hermes 网关健康</div><div id="hermesHealthBox" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim)">加载中...</div></div>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🔄 Web前端轮询</div><div class="cron-table"><table><thead><tr><th>页面</th><th>刷新周期</th><th>说明</th></tr></thead><tbody>
   <tr><td>🦐 Token看板</td><td>每15秒</td><td>虾厂工作状态轮询（不消耗token）</td></tr>
   <tr><td>🦐 Token看板</td><td>每30秒</td><td>系统健康数据轮询</td></tr>
@@ -1024,7 +1028,7 @@ async function fetchAgentStatus() {
         `<span>_PID: ${gh.pid || '-'}</span>`,
       ].join('');
     }
-    // 渲染 Hermes 健康卡片（2026-08-18 新增：hermes 网关 + 心跳 + watchdog 监测）
+    // 渲染 Hermes 健康卡片（2026-08-18 新增：hermes 网关 + 心跳 + watchdog 监测；2026-10-14 新增 TG 通道四态展示）
     const hm = d.hermesHealth;
     const hmBox = document.getElementById('hermesHealthBox');
     if (hmBox && hm) {
@@ -1033,8 +1037,21 @@ async function fetchAgentStatus() {
       const hbColor = hm.hbFresh ? 'var(--green)' : 'var(--red)';
       const hbText = hm.hbAgeSec !== null ? (hm.hbFresh ? `${hm.hbAgeSec}s` : `${hm.hbAgeSec}s ⚠️假死`) : '无心跳文件';
       const wdText = hm.watchdogTriggered ? `⚠️ ${mEsc(hm.watchdogLast)}` : '未触发';
+      // TG 通道状态（2026-10-14）：只消费后端 tg_state/tg_state_age 四态，前端纯展示不自行判定（判定在 server _hermes_health，同源 watchdog v5.2 STALE_SECS=600）
+      const tgAge = hm.tg_state_age;
+      let tgHtml = '';
+      if (hm.tg_state === 'connected') {
+        tgHtml = `<span>📨 TG: <b style="color:var(--green)">connected ✅</b></span>`;
+      } else if (hm.tg_state === 'retrying') {
+        tgHtml = `<span>📨 TG: <b style="color:var(--yellow)">retrying${tgAge != null ? `（${tgAge}s 未恢复）` : ''}</b></span>`;
+      } else if (hm.tg_state === 'frozen') {
+        tgHtml = `<span style="background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.45);border-radius:6px;padding:2px 8px">📨 TG: <b style="color:var(--red)">冻结 ⚠️${tgAge != null ? `（已 ${fmtDur(tgAge)} 无更新）` : ''}</b></span>`;
+      } else {
+        tgHtml = `<span>📨 TG: <b style="color:var(--dim)">unknown ❓</b></span>`;
+      }
       hmBox.innerHTML = [
         `<span>🟢 状态: <b style="color:${runColor}">${runText}</b></span>`,
+        tgHtml,
         `<span>💓 心跳: <b style="color:${hbColor}">${hbText}</b></span>`,
         `<span>🐕 watchdog: ${wdText}</span>`,
         hm.note ? `<span style="color:var(--yellow)">${hm.note}</span>` : '',

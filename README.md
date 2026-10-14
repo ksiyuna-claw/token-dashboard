@@ -18,9 +18,10 @@
 |------|------|--------|
 | 🦐 虾厂员工 | 12虾agent卡片（模型chips+工作状态动画光效）+7个tab：主会话/心跳/子代理/Slash/微信Bot/系统/全部 | `/agent-status`（15秒轮询）+ `/sessions-json` |
 | 📦 模型供应商额度 | 智谱国内/Kimi/DeepSeek/MiniMax 额度卡片（服务端额度缓存60s） | `/providers` 列表 + `/quota/<id>` 代理各家官方API（5分钟轮询） |
+| 📦 Hermes 网关健康（2026-10-14 独立成区块，位于邮箱监控之前） | 进程状态 + 心跳 + watchdog触发记录 + **TG通道状态四态**（connected ✅绿 / retrying（Xs未恢复）黄 / 冻结 ⚠️红告警醒目 / unknown ❓灰）；纯读展示零探测逻辑，四态判定全在后端 | `/agent-status` 的 `hermesHealth`（新增 `tg_state`/`tg_state_age` 字段，15秒轮询）；同源 watchdog v5.2（30min双信号自愈：进程+心跳+TG状态）读 `~/.hermes/gateway_state.json` |
 | 📬 邮箱监控 | 未读邮件状态 | `email_monitor.py`（系统crontab每30分钟）写 `data/email_status.json` → `/email-status` |
 | 🩺 系统健康 | 6卡片：CPU/内存/Swap/磁盘/负载1m5m15m/CDP Chrome（含CDP异常警告条） | `/health-json`（30秒轮询） |
-| ⏱ **定时任务**（2026-09-07上线，四层折叠） | ① OpenClaw闹钟表：任务名/Agent/用途/周期/上次执行/状态/下次执行/模型（8列；用途列=静态字典+前缀规则动态生成零维护）② 系统crontab ③ LaunchAgent ④ 心跳表；**内嵌子块**：Gateway健康+Hermes网关健康+Web前端轮询说明表；另有独立总览页 `/cron` | `/cron-json` 读 `openclaw cron list` 等（5分钟轮询） |
+| ⏱ **定时任务**（2026-09-07上线，四层折叠） | ① OpenClaw闹钟表：任务名/Agent/用途/周期/上次执行/状态/下次执行/模型（8列；用途列=静态字典+前缀规则动态生成零维护）② 系统crontab ③ LaunchAgent ④ 心跳表；**内嵌子块**：Gateway健康+Web前端轮询说明表（Hermes网关健康2026-10-14独立成区块上移至邮箱监控之前）；另有独立总览页 `/cron` | `/cron-json` 读 `openclaw cron list` 等（5分钟轮询） |
 | 📊 总览 | 6卡片：员工总数/总Session/主会话/子代理/总输入Token/总输出Token | 前端聚合sessions数据 |
 | 🖥️ 系统任务 | 系统级任务卡片 | `/system-tasks`（15秒轮询） |
 
@@ -33,7 +34,7 @@
 ```
 token_dashboard_server.py   ← HTTP服务 :18888（launchd常驻，项目目录内，2396行）
 全部端点（12个，2026-10-11代码实测）：
-  /                    ← 主页面（templates/token_dashboard.html，1170行）
+  /                    ← 主页面（templates/token_dashboard.html，1191行）
   /cron                ← 独立定时任务总览页（cron.html）
   /login /logout       ← 登录/登出（公网访问鉴权）
   /agent-status        ← 虾厂员工状态（15秒轮询）
