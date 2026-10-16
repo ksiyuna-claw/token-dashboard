@@ -9,7 +9,7 @@
 | 入口 | 地址 | 说明 |
 |------|------|------|
 | 本机 | http://127.0.0.1:18888/ | launchd服务 `com.openclaw.token-dashboard`（KeepAlive常驻） |
-| 公网 | https://token-dashboard.crypto-signal.work/ | cloudflared `quant-dashboard` 隧道（与量化看板家族共用，配置在 `~/.cloudflared/config.yml`） |
+| 公网 | https://token-dashboard.crypto-signal.work/ | cloudflared `quant-dashboard` 隧道（与量化看板家族共用，配置在 `~/.cloudflared/config.yml`）。**传输协议=http2（TCP 443）**，2026-10-16 起长期固定：当日家网持续阻断 UDP 7844（QUIC）致整条隧道 530/1033，降级 http2 后恢复且为官方标准处置；**勿切回 quic**（该网络 UDP 长会话不可靠，且显式钉 quic 会关闭自动降级）。根因分析与排障档案：`ai_workspace/tickets/1016-cloudflared隧道修复/` |
 | 手机查数 | TG发「查token」 | 触发 `ai_workspace/scripts/token_usage_push.py` 推送（手动口令模式，无自动调度） |
 
 ## 功能全景（页面7区块+额度告警逻辑，2026-10-11 curl实测+代码通读核实）
