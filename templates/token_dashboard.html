@@ -444,17 +444,24 @@ function renderNoQuota(name, subtitle, note) {
   return `<div class="card${isOverseas ? ' card-overseas' : ''}"><div class="provider-name">${name}${isOverseas ? ' <span class="overseas-badge">🌐</span>' : ''}</div><div class="provider-sub">${subtitle}</div><div class="no-quota">${note}</div></div>`;
 }
 
+let _quotaRetryTimer = null;  // P0(2026-10-22): 额度板块失败后的30秒快速重试定时器
 async function fetchProviderQuotas() {
   const cards = [];
   try {
     // 动态获取 provider 列表
     const pr = await fetch('/providers');
+    // P0(2026-10-22): 隧道抖动(cloudflared 502 HTML)/登录过期(302→/login HTML)时 r.json() 抛
+    // "Unexpected token '<'"——先验响应再解析，给人话错误
+    if (pr.redirected || /\/login(\?|$)/.test(pr.url)) throw new Error('登录已过期，请刷新页面重新登录');
+    if (!pr.ok || !(pr.headers.get('content-type')||'').includes('json')) throw new Error('网络抖动(HTTP ' + pr.status + ')，稍后自动重试');
     const providers = await pr.json();
     if (providers.error) throw new Error(providers.error);
     // 并发请求每个 provider 的额度
     const results = await Promise.allSettled(
       providers.map(async p => {
         const r = await fetch('/quota/' + p.id);
+        if (r.redirected || /\/login(\?|$)/.test(r.url)) throw new Error('登录已过期');
+        if (!r.ok || !(r.headers.get('content-type')||'').includes('json')) throw new Error('HTTP ' + r.status);
         return { provider: p, data: await r.json() };
       })
     );
@@ -462,7 +469,7 @@ async function fetchProviderQuotas() {
       const res = results[i];
       const p = providers[i];
       if (res.status !== 'fulfilled') {
-        cards.push(renderNoQuota(p.label, p.baseUrl.split('//')[1]?.split('/')[0] || '', '请求失败'));
+        cards.push(renderNoQuota(p.label, p.baseUrl.split('//')[1]?.split('/')[0] || '', '请求失败(' + ((res.reason && res.reason.message) || '网络抖动') + ')'));
         continue;
       }
       const j = res.value.data;
@@ -568,6 +575,10 @@ async function fetchProviderQuotas() {
     }
   } catch(e) {
     cards.push(renderNoQuota('供应商额度', '', '获取失败: '+e.message));
+    // P0(2026-10-22): 板块轮询5分钟一次太长，失败后30秒快速重试，不等下一轮
+    if (!_quotaRetryTimer) {
+      _quotaRetryTimer = setTimeout(() => { _quotaRetryTimer = null; fetchProviderQuotas(); }, 30000);
+    }
   }
   document.getElementById('providerGrid').innerHTML = cards.join('');
 }
