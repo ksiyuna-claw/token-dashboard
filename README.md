@@ -17,7 +17,7 @@
 | 区块 | 内容（代码实锤） | 数据源 |
 |------|------|--------|
 | 🦐 虾厂员工 | 12虾agent卡片（模型chips+工作状态动画光效）+7个tab：主会话/心跳/子代理/Slash/微信Bot/系统/全部 | `/agent-status`（15秒轮询）+ `/sessions-json` |
-| 📦 模型供应商额度 | 智谱国内/Kimi/DeepSeek/MiniMax 额度卡片（服务端额度缓存60s） | `/providers` 列表 + `/quota/<id>` 代理各家官方API（5分钟轮询） |
+| 📦 模型供应商额度 | 智谱国内/Kimi/DeepSeek 额度卡片 + **RunPod GPU云卡片**（2026-10-28上线：余额USD + 活跃pod数/每pod小时成本，服务端额度缓存60s） | `/providers` 列表 + `/quota/<id>` 代理各家官方API（5分钟轮询）；RunPod=GraphQL clientBalance + REST v2 /v2/pods 合成，key在项目config.json（非LLM provider，静态注入，gitignore已忽略） |
 | 📦 Hermes 网关健康（2026-10-14 独立成区块，位于邮箱监控之前） | 进程状态 + 心跳 + watchdog触发记录 + **TG通道状态四态**（connected ✅绿 / retrying（Xs未恢复）黄 / 冻结 ⚠️红告警醒目 / unknown ❓灰）；纯读展示零探测逻辑，四态判定全在后端 | `/agent-status` 的 `hermesHealth`（新增 `tg_state`/`tg_state_age` 字段，15秒轮询）；同源 watchdog v5.2（30min双信号自愈：进程+心跳+TG状态）读 `~/.hermes/gateway_state.json` |
 | 📬 邮箱监控 | 未读邮件状态 | `email_monitor.py`（系统crontab每30分钟）写 `data/email_status.json` → `/email-status` |
 | 🩺 系统健康 | 6卡片：CPU/内存/Swap/磁盘/负载1m5m15m/CDP Chrome（含CDP异常警告条） | `/health-json`（30秒轮询） |

@@ -446,6 +446,12 @@ function renderNoQuota(name, subtitle, note) {
 }
 
 let _quotaRetryTimer = null;  // P0(2026-10-22): 额度板块失败后的30秒快速重试定时器
+function scheduleQuotaRetry() {
+  // Y1(2026-10-28 R1审): 统一重试入口——单provider rejected/返回error也要触发，不限于整体catch
+  if (!_quotaRetryTimer) {
+    _quotaRetryTimer = setTimeout(() => { _quotaRetryTimer = null; fetchProviderQuotas(); }, 30000);
+  }
+}
 async function fetchProviderQuotas() {
   const cards = [];
   try {
@@ -466,14 +472,17 @@ async function fetchProviderQuotas() {
         return { provider: p, data: await r.json() };
       })
     );
+    let quotaAnyFailed = false;
     for (let i = 0; i < results.length; i++) {
       const res = results[i];
       const p = providers[i];
       if (res.status !== 'fulfilled') {
+        quotaAnyFailed = true;
         cards.push(renderNoQuota(p.label, p.baseUrl.split('//')[1]?.split('/')[0] || '', '请求失败(' + ((res.reason && res.reason.message) || '网络抖动') + ')'));
         continue;
       }
       const j = res.value.data;
+      if (j && j.error) quotaAnyFailed = true;  // Y1: fulfilled但返回error也触发重试
       const host = p.baseUrl.split('//')[1].split('/')[0];
       if (p.quotaType === 'zhipu_quota') {
         if (j.code === 200) {
@@ -572,14 +581,40 @@ async function fetchProviderQuotas() {
         } else {
           cards.push(renderNoQuota(p.label, host, 'API返回异常'));
         }
+      } else if (p.quotaType === 'runpod_gpu') {
+        if (j.balance !== undefined) {
+          const bal = parseFloat(j.balance).toFixed(2);
+          const podRows = j.pods || [];
+          // R1(2026-10-28 R1审): 底部标签按RUNNING运行数判定，不再拿列表长度当运行数；服务端给全量计数，旧缓存无此字段时前端兜底；计数parseInt防非数字串入innerHTML
+          const runningN = (j.runningCount != null) ? (parseInt(j.runningCount, 10) || 0) : podRows.filter(pd => pd.status === 'RUNNING').length;
+          const totalN = (j.podCount != null) ? (parseInt(j.podCount, 10) || 0) : podRows.length;
+          let podHtml = '';
+          podRows.forEach(pd => {
+            // R1: 每行始终展示真实status（EXITED/ERROR也会返回cost，不能只显时薪）；R2(2026-10-28 R1审): pod名/GPU/状态均为用户可控字符串，入DOM前统一mEsc转义
+            const st = String(pd.status || 'UNKNOWN');
+            const right = (pd.costPerHr != null) ? mEsc(st) + ' · $' + parseFloat(pd.costPerHr).toFixed(2) + '/时' : mEsc(st);
+            podHtml += '<div class="quota-row"><div><div class="label">' + mEsc(pd.name || 'pod') + (pd.gpu ? ' · ' + mEsc(pd.gpu) : '') + '</div></div><div class="value">' + right + '</div></div>';
+          });
+          if (totalN > podRows.length) podHtml += '<div class="quota-row"><div><div class="label">…共 ' + totalN + ' 个</div></div><div></div></div>';
+          const podTag = runningN > 0 ? '<span class="tag tag-green">GPU 运行中 ×' + runningN + '</span>'
+            : (totalN > 0 ? '<span class="tag" style="background:rgba(210,153,34,0.18);color:#d29922">GPU 已停 ×' + totalN + '</span>'
+            : '<span class="tag tag-green">GPU 未开机</span>');
+          cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费（云GPU）</div>' +
+            '<div class="quota-row"><div><div class="label">余额（USD）</div></div><div class="value" style="color:var(--green)">$' + bal + '</div></div>' +
+            podHtml +
+            '<div class="quota-row" style="border:none"><div></div>' + podTag + '</div></div>');
+        } else if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
+        } else {
+          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+        }
       }
     }
+    if (quotaAnyFailed) scheduleQuotaRetry();  // Y1: 单provider失败也30s快速重试
   } catch(e) {
     cards.push(renderNoQuota('供应商额度', '', '获取失败: '+e.message));
     // P0(2026-10-22): 板块轮询5分钟一次太长，失败后30秒快速重试，不等下一轮
-    if (!_quotaRetryTimer) {
-      _quotaRetryTimer = setTimeout(() => { _quotaRetryTimer = null; fetchProviderQuotas(); }, 30000);
-    }
+    scheduleQuotaRetry();
   }
   document.getElementById('providerGrid').innerHTML = cards.join('');
 }

@@ -10,6 +10,14 @@
   },
   "work_dir": "/home/YOUR_USER/ai_workspace/scripts",
   "system_tasks": [
-    {"name": "示例任务", "owner": "系统", "period": "每30分钟", "match": ["example_script.py"]}
-  ]
+    {
+      "name": "示例任务",
+      "owner": "系统",
+      "period": "每30分钟",
+      "match": [
+        "example_script.py"
+      ]
+    }
+  ],
+  "runpod_key": "YOUR_RUNPOD_API_KEY"
 }

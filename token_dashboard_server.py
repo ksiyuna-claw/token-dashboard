@@ -745,6 +745,22 @@ def _get_providers():
                 'quotaApi': quota_api,
                 'quotaType': quota_type,
             })
+        # RunPod GPU云（2026-10-28 匡书记指令：余额+pod状态上额度区块）
+        # 非LLM provider、不在openclaw.json，静态注入；key放本项目config.json（gitignore已忽略）
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')) as f:
+                rp_key = json.load(f).get('runpod_key', '')
+            if rp_key and len(rp_key) >= 10:
+                result.append({
+                    'id': 'runpod',
+                    'label': 'RunPod GPU云（数字人口播）',
+                    'baseUrl': 'https://api.runpod.io',
+                    'apiKey': rp_key,
+                    'quotaApi': 'https://api.runpod.io/graphql',
+                    'quotaType': 'runpod_gpu',
+                })
+        except Exception:
+            pass  # config读不到/格式错 → 不展示RunPod卡片，不影响其他provider
         return result
     except Exception as e:
         return []
@@ -2057,6 +2073,58 @@ class H(http.server.SimpleHTTPRequestHandler):
             else:
                 self._send_json(502, {'error': str(e)})
 
+    def _proxy_runpod(self, api_key, provider_id):
+        """RunPod 余额+Pod状态（2026-10-28）：GraphQL clientBalance + REST v2 /v2/pods 合成查询。
+        缓存/超时fallback策略与 _proxy_quota 一致（60s TTL + 旧缓存兜底）。"""
+        from urllib.parse import quote
+        now = time.time()
+        with _quota_cache_lock:
+            c = _quota_cache.get(provider_id)
+            if c and now - c[0] < _QUOTA_CACHE_TTL:
+                self._send_json(200, c[1])
+                return
+            stale_cache = c
+        try:
+            # ① 余额：GraphQL v1端点，api_key走query param（/graphql/v2实测404勿用；字段名clientBalance非balance）
+            gql_req = urllib.request.Request(
+                'https://api.runpod.io/graphql?api_key=' + quote(api_key),
+                data=json.dumps({'query': '{ myself { clientBalance } }'}).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}, method='POST')
+            with _PROXY_OPENER.open(gql_req, timeout=10) as resp:
+                balance = json.loads(resp.read())['data']['myself']['clientBalance']
+            # ② Pod状态：REST v2 Bearer认证；字段名按官方OpenAPI示例（status/gpu{id,count}/cost/startedAt）
+            pods_req = urllib.request.Request('https://api.runpod.io/v2/pods',
+                headers={'Authorization': 'Bearer ' + api_key})
+            with _PROXY_OPENER.open(pods_req, timeout=10) as resp:
+                pods = json.loads(resp.read()).get('pods', [])
+            # R1(2026-10-28 R1审): 展示列表排除TERMINATED；podCount=可见Pod总数、runningCount只计RUNNING（不再用len(pods)把关机Pod计成运行中）
+            visible_pods = [x for x in pods if (x.get('status') or '').strip().upper() != 'TERMINATED']
+            running_count = sum(1 for pd in visible_pods if (pd.get('status') or '').strip().upper() == 'RUNNING')
+            pod_list = []
+            for pd in visible_pods[:6]:
+                g = pd.get('gpu') or {}
+                gpu_str = (g.get('id') or '') + ('×' + str(g['count']) if (g.get('count') or 1) > 1 else '')
+                pod_list.append({'name': pd.get('name') or pd.get('id'), 'status': pd.get('status'),
+                                 'gpu': gpu_str, 'costPerHr': pd.get('cost'), 'startedAt': pd.get('startedAt')})
+            data = {'balance': balance, 'podCount': len(visible_pods),
+                    'runningCount': running_count,
+                    'pods': pod_list}
+            with _quota_cache_lock:
+                _quota_cache[provider_id] = (now, data)
+            self._send_json(200, data)
+        except (urllib.error.URLError, TimeoutError) as e:
+            if stale_cache:
+                d2 = dict(stale_cache[1]); d2['cached'] = True
+                self._send_json(200, d2)
+            else:
+                self._send_json(504, {'error': 'RunPod API超时: ' + str(e), 'cached': False})
+        except Exception as e:
+            if stale_cache:
+                d2 = dict(stale_cache[1]); d2['cached'] = True
+                self._send_json(200, d2)
+            else:
+                self._send_json(502, {'error': str(e), 'cached': False})
+
     def do_OPTIONS(self):
         """处理 CORS preflight"""
         self.send_response(204)
@@ -2165,7 +2233,10 @@ class H(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': f'Unknown provider: {pid}'}).encode())
                 return
-            self._proxy_quota(p['quotaApi'], p['apiKey'], pid)
+            if p['quotaType'] == 'runpod_gpu':
+                self._proxy_runpod(p['apiKey'], pid)
+            else:
+                self._proxy_quota(p['quotaApi'], p['apiKey'], pid)
         elif self.path == '/sessions-json':
             # 使用缓存层，避免每次轮询都 spawn CLI
             d = _get_cached_sessions()
