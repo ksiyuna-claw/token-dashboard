@@ -1331,12 +1331,14 @@ def _ws_listener_loop():
                                             _agent_ws_activity[agent_id] = now_ms
                                         logging.info(f'[WS] sessions.changed → {session_key or agent_id} hasActiveRun={has_active_run} (processed OK)')
                                     else:
-                                        # 只清本 session 的 run 标记；活动时间戳更新而非删除
-                                        # （run 结束也是一次活动，30s TTL 自然过期）
+                                        # 只清本 session 的 run 标记；不刷新真实活动时间。
+                                        # 修复(2026-11-03)：旧失败/历史会话（status=failed、
+                                        # subagentRunState=historical）每约60秒发一次
+                                        # hasActiveRun=False，原逻辑在 False 分支也更新
+                                        # _agent_ws_activity，导致30s WS窗口周期性误亮working。
+                                        # 终态/历史状态不是工作活动证据，只清标记。
                                         _agent_active_runs.pop(session_key, None)
-                                        if agent_id:
-                                            _agent_ws_activity[agent_id] = now_ms
-                                        logging.info(f'[WS] sessions.changed → {session_key or agent_id} hasActiveRun={has_active_run} (processed OK)')
+                                        logging.info(f'[WS] sessions.changed → {session_key or agent_id} hasActiveRun={has_active_run} (processed OK, no activity refresh)')
                                 continue
 
                             # 其他非 health 事件都尝试提取 agentId
