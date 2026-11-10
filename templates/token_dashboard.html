@@ -608,6 +608,34 @@ async function fetchProviderQuotas() {
         } else {
           cards.push(renderNoQuota(p.label, host, 'API返回异常'));
         }
+      } else if (p.quotaType === 'codex_usage') {
+        if (j.primaryWindow && j.primaryWindow.usedPercent != null) {
+          const planName = {'prolite':'Pro Lite','pro':'Pro','plus':'Plus','free':'Free'}[j.plan] || (j.plan || '').toUpperCase();
+          const restrictedTag = j.allowed === false ? ' <span class="tag tag-red">额度受限</span>' : '';
+          const toLimit = (w) => {
+            const v = w.usedPercent;
+            if (typeof v !== 'number' || !isFinite(v) || v < 0) return null;  // R2(1110): 非法值fail-closed，不伪装0%
+            return {
+              type: 'TOKENS_LIMIT',
+              unit: w.limitWindowSeconds === 604800 ? 6 : (w.limitWindowSeconds === 18000 ? 3 : 0),
+              percentage: v,
+              nextResetTime: w.resetAt ? w.resetAt * 1000 : null
+            };
+          };
+          const pLimit = toLimit(j.primaryWindow);
+          if (pLimit == null) {
+            cards.push(renderNoQuota(p.label, host, '数据异常（usedPercent非法）'));  // R2: 非法值显示数据异常，不得显示0%
+          } else {
+            const limits = [pLimit];
+            const sLimit = j.secondaryWindow ? toLimit(j.secondaryWindow) : null;
+            if (sLimit != null) limits.push(sLimit);
+            cards.push(renderQuotaCard(p.label, 'ChatGPT 订阅 · ' + mEsc(planName) + restrictedTag, limits));
+          }
+        } else if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
+        } else {
+          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+        }
       }
     }
     if (quotaAnyFailed) scheduleQuotaRetry();  // Y1: 单provider失败也30s快速重试

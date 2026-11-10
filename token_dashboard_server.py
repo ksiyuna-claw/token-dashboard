@@ -109,6 +109,12 @@ def _jwt_verify(token: str) -> bool:
     except Exception:
         return False
 
+def _codex_valid_pct(v):
+    # R2(1110): Codex用量百分比契约校验——必须为有限、非负数字（bool/字符串/NaN/Inf/负值/None均非法）
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    return v == v and v not in (float('inf'), float('-inf')) and v >= 0
+
 def _check_login_rate_limit(client_ip):
     """检查登录频率，返回True表示允许尝试"""
     now = time.time()
@@ -761,6 +767,22 @@ def _get_providers():
                 })
         except Exception:
             pass  # config读不到/格式错 → 不展示RunPod卡片，不影响其他provider
+        # Codex 用量（2026-11-10 匡书记指令：codex剩余用量上额度区块）
+        # 非LLM provider、不在openclaw.json，静态注入；凭证=~/.codex/auth.json（ChatGPT OAuth，代理方法内现读，不落配置）
+        try:
+            with open(os.path.expanduser('~/.codex/auth.json')) as f:
+                cd_tok = (json.load(f).get('tokens') or {}).get('access_token') or ''
+            if cd_tok and len(cd_tok) >= 20:
+                result.append({
+                    'id': 'codex',
+                    'label': 'Codex（ChatGPT订阅）',
+                    'baseUrl': 'https://chatgpt.com',
+                    'apiKey': 'oauth',
+                    'quotaApi': 'https://chatgpt.com/backend-api/codex/usage',
+                    'quotaType': 'codex_usage',
+                })
+        except Exception:
+            pass  # auth.json读不到 → 不展示Codex卡片，不影响其他provider
         return result
     except Exception as e:
         return []
@@ -2127,6 +2149,69 @@ class H(http.server.SimpleHTTPRequestHandler):
             else:
                 self._send_json(502, {'error': str(e), 'cached': False})
 
+    def _proxy_codex(self, provider_id):
+        """Codex 用量（2026-11-10）：GET chatgpt.com/backend-api/codex/usage（ChatGPT OAuth）。
+        每次现读 ~/.codex/auth.json（令牌自动续期后无需改配置）；缓存/超时fallback同 _proxy_quota（60s TTL+旧缓存兑底）。"""
+        now = time.time()
+        with _quota_cache_lock:
+            c = _quota_cache.get(provider_id)
+            if c and now - c[0] < _QUOTA_CACHE_TTL:
+                self._send_json(200, c[1])
+                return
+            stale_cache = c
+        try:
+            with open(os.path.expanduser('~/.codex/auth.json')) as f:
+                auth = json.load(f)['tokens']
+            tok = auth.get('access_token') or ''
+            acct = auth.get('account_id') or ''
+            if not tok:
+                raise RuntimeError('auth.json无access_token')
+            req = urllib.request.Request(
+                'https://chatgpt.com/backend-api/codex/usage',
+                headers={'Authorization': 'Bearer ' + tok,
+                         'chatgpt-account-id': acct,
+                         'User-Agent': 'codex-cli/0.166.0'})
+            with _PROXY_OPENER.open(req, timeout=10) as resp:
+                raw = json.loads(resp.read())
+            rl = raw.get('rate_limit') or {}
+            pw = rl.get('primary_window') or {}
+            sw = rl.get('secondary_window')
+            if not _codex_valid_pct(pw.get('used_percent')):
+                # R2(1110): 主窗口used_percent非法→fail-closed，不写新缓存（走stale兜底或502）
+                raise ValueError('codex used_percent非法: %r' % (pw.get('used_percent'),))
+            data = {
+                'plan': raw.get('plan_type') or 'unknown',
+                'allowed': rl.get('allowed'),
+                'primaryWindow': {
+                    'usedPercent': pw.get('used_percent'),
+                    'limitWindowSeconds': pw.get('limit_window_seconds'),
+                    'resetAfterSeconds': pw.get('reset_after_seconds'),
+                    'resetAt': pw.get('reset_at'),
+                } if pw else None,
+                'secondaryWindow': ({
+                    'usedPercent': sw.get('used_percent'),
+                    'limitWindowSeconds': sw.get('limit_window_seconds'),
+                    'resetAfterSeconds': sw.get('reset_after_seconds'),
+                    'resetAt': sw.get('reset_at'),
+                } if sw and _codex_valid_pct(sw.get('used_percent')) else None),  # R2(1110): 短窗口非法则丢弃fail-closed，不影响主窗口
+                'hasCredits': (raw.get('credits') or {}).get('has_credits'),
+            }
+            with _quota_cache_lock:
+                _quota_cache[provider_id] = (now, data)
+            self._send_json(200, data)
+        except (urllib.error.URLError, TimeoutError) as e:
+            if stale_cache:
+                d2 = dict(stale_cache[1]); d2['cached'] = True
+                self._send_json(200, d2)
+            else:
+                self._send_json(504, {'error': 'Codex API超时: ' + str(e), 'cached': False})
+        except Exception as e:
+            if stale_cache:
+                d2 = dict(stale_cache[1]); d2['cached'] = True
+                self._send_json(200, d2)
+            else:
+                self._send_json(502, {'error': str(e), 'cached': False})
+
     def do_OPTIONS(self):
         """处理 CORS preflight"""
         self.send_response(204)
@@ -2237,6 +2322,8 @@ class H(http.server.SimpleHTTPRequestHandler):
                 return
             if p['quotaType'] == 'runpod_gpu':
                 self._proxy_runpod(p['apiKey'], pid)
+            elif p['quotaType'] == 'codex_usage':
+                self._proxy_codex(pid)
             else:
                 self._proxy_quota(p['quotaApi'], p['apiKey'], pid)
         elif self.path == '/sessions-json':
