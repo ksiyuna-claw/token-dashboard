@@ -181,7 +181,7 @@
     <div class="summary-card"><div class="val" id="hCpu">...</div><div class="lbl">CPU 使用率</div></div>
     <div class="summary-card"><div class="val" id="hMem">...</div><div class="lbl">内存</div></div>
     <div class="summary-card"><div class="val" id="hSwap">...</div><div class="lbl">Swap</div></div>
-    <div class="summary-card"><div class="val" id="hDisk">...</div><div class="lbl">磁盘 /</div></div>
+    <div class="summary-card"><div class="val" id="hDisk">...</div><div class="lbl">磁盘已用</div></div>
     <div class="summary-card"><div class="val" id="hLoad">...</div><div class="lbl">负载 1m/5m/15m</div></div>
     <div class="summary-card"><div class="val" id="hCdp">...</div><div class="lbl">CDP Chrome</div></div>
   </div>
@@ -850,10 +850,19 @@ async function fetchHealth() {
       swapEl.style.color = 'var(--dim)';
     }
     
-    // 磁盘
+    // 磁盘（已用磁盘空间比例·全容器口径2026-11-11修正；悬停显示已用/总量GB）
     const diskEl = document.getElementById('hDisk');
-    diskEl.textContent = (d.disk_pct || '?') + '%';
-    diskEl.style.color = d.disk_pct > 90 ? 'var(--red)' : d.disk_pct > 80 ? 'var(--yellow)' : 'var(--green)';
+    if (d.disk_pct == null) {
+      diskEl.textContent = '—';
+      diskEl.title = '磁盘状态未知（采集失败）';
+      diskEl.style.color = 'var(--dim)';
+    } else {
+      diskEl.textContent = d.disk_pct + '%';
+      diskEl.title = (d.disk_used_gb != null && d.disk_total_gb != null)
+        ? ('已用 ' + d.disk_used_gb + 'G / 共 ' + d.disk_total_gb + 'G')
+        : '已用磁盘空间比例';
+      diskEl.style.color = d.disk_pct > 90 ? 'var(--red)' : d.disk_pct > 80 ? 'var(--yellow)' : 'var(--green)';
+    }
     
     // 负载
     const loadEl = document.getElementById('hLoad');
@@ -1238,9 +1247,12 @@ async function fetchSystemTasks() {
       }
     }
     for (const u of unknown) {
+      const isCodex = u.kind === 'codex';
+      const uLabel = isCodex ? '🐙 codex 外部执行' : '❓ 未识别进程';
+      const uColor = isCodex ? 'var(--text)' : 'var(--yellow)';
       html += `<div class="quota-row" title="PID ${u.pid} · ${mEsc(u.cmdSummary)}">
-        <div class="main-col"><div class="label" style="color:var(--yellow)">❓ 未识别进程 <span style="font-size:11px;color:var(--dim)">${mEsc(u.cmdSummary)}</span></div></div>
-        <div style="font-size:12px;color:var(--yellow)">已跑 ${fmtDur(u.elapsedSec)}</div>
+        <div class="main-col"><div class="label" style="color:${uColor}">${uLabel} <span style="font-size:11px;color:var(--dim)">${mEsc(u.cmdSummary)}</span></div></div>
+        <div style="font-size:12px;color:${uColor}">已跑 ${fmtDur(u.elapsedSec)}</div>
       </div>`;
     }
     card.innerHTML = html || '<div class="empty-msg">无系统任务</div>';

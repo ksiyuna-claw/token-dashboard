@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """虾厂 Token 看板 HTTP 服务"""
-import http.server, json, subprocess, os, time, urllib.request, urllib.error, threading, uuid, logging, logging.handlers, gc, resource, functools, plistlib, hmac, hashlib, base64, sqlite3  # B7(2026-09-11): sqlite3提模块级，原函数内重复import在循环调用下纯浪费
+import http.server, json, subprocess, os, time, urllib.request, urllib.error, threading, uuid, logging, logging.handlers, gc, resource, functools, plistlib, hmac, hashlib, base64, sqlite3, shutil  # B7(2026-09-11): sqlite3提模块级，原函数内重复import在循环调用下纯浪费；shutil(2026-11-11): 磁盘口径修正用
 
 # ── Auth 配置（JWT 无状态认证）─────────
 _AUTH_ENV_PATH = os.path.join(os.path.expanduser('~'), '.openclaw/workspace/ai_workspace/projects/2026-06-04-量化信息看板/.env')
@@ -969,15 +969,18 @@ def _get_system_health():
         result['cdp_renderers'] = cdp_renderers
         result['cdp_ok'] = len(cdp_renderers) == 0
 
-        # 磁盘空间
-        r = subprocess.run(['/bin/df', '-g', '/'], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.strip().split('\n')[1:]:
-            parts = line.split()
-            if len(parts) >= 4:
-                result['disk_total_gb'] = float(parts[1])
-                result['disk_used_gb'] = float(parts[2])
-                result['disk_pct'] = int(parts[4].rstrip('%'))
-                break
+        # 磁盘空间（2026-11-11 匡书记批准口径修正：已用%=全容器口径shutil.disk_usage，与health_check告警同算法；
+        # 旧df /在macOS测只读系统卷(~13G自占用)恒显15-16%误导；标签注明「磁盘已用」防误读为剩余）
+        try:
+            _du = shutil.disk_usage('/')
+            result['disk_total_gb'] = round(_du.total / 1073741824, 1)
+            result['disk_used_gb'] = round(_du.used / 1073741824, 1)
+            result['disk_pct'] = int(round(_du.used / _du.total * 100))
+            result.pop('disk_error', None)  # R1(1110)④二轮：恢复时清掉上次失败的stale错误标记
+        except (OSError, ZeroDivisionError) as _de:
+            # R1(1110): 显式不可用态替代吞异常——disk_pct=None+disk_error（无堆栈，前端走未知态中性色）
+            result['disk_pct'] = None
+            result['disk_error'] = 'unavailable: ' + type(_de).__name__
 
         # 系统负载
         r = subprocess.run(['/usr/bin/uptime'], capture_output=True, text=True, timeout=5)
@@ -1645,6 +1648,13 @@ def _sys_task_scan_once():
         if '.openclaw/workspace' not in cmd and 'ai_workspace' not in cmd:
             continue
         if et is not None and et > 1800:
+            continue
+        # [2026-11-11 匡书记批准] codex外部执行识别：命令行含 codex: 会话标记或 full.rc/full.log
+        # 执行样板（codex跑测试的包装进程）→ 标签「codex 外部执行」不落❓未识别（13:26看板噪音治理）
+        if 'codex:' in cmd or ('full.rc' in cmd and 'full.log' in cmd):
+            _i = cmd.find('codex:')
+            _sum = ('codex:' + cmd[_i + 6:_i + 14] + '…') if _i >= 0 else (cmd if len(cmd) <= 100 else '…' + cmd[-95:])
+            unknown.append({'pid': pid, 'elapsedSec': et, 'cmdSummary': _sum, 'kind': 'codex'})
             continue
         # 摘要取尾部：脚本名/参数在命令行尾部，头部都是路径前缀
         summary = cmd if len(cmd) <= 100 else '…' + cmd[-95:]
