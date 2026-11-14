@@ -826,7 +826,7 @@ def _cron_purpose_fill(name, enabled=True):
     return ''
 
 # 所有 agent ID（用于遍历 cron）
-ALL_AGENTS = ['main', 'jiweixia', 'caoxia', 'pipixia', 'banjiexia', 'duijiaoxia', 'shanbei', 'hailuo', 'xiaohexia', 'haixing', 'haima', 'yoooclaw']
+ALL_AGENTS = ['main', 'jiweixia', 'caoxia', 'pipixia', 'banjiexia', 'duijiaoxia', 'shanbei', 'hailuo', 'xiaohexia', 'haixing', 'haima', 'yoooclaw', 'linxia']
 
 # agent 中文名
 AGENT_NAMES = {
@@ -842,6 +842,7 @@ AGENT_NAMES = {
     'haixing': '海星',
     'haima': '海马',
     'yoooclaw': 'YoooClaw',
+    'linxia': '磷虾',
 }
 
 CRONTAB_PURPOSE = {
