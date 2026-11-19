@@ -783,6 +783,22 @@ def _get_providers():
                 })
         except Exception:
             pass  # auth.json读不到 → 不展示Codex卡片，不影响其他provider
+        # TikHub 社媒数据API（2026-11-19 匡书记指令：余额上额度区块）
+        # 非LLM provider、不在openclaw.json，静态注入；key放本项目config.json（gitignore已忽略）
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')) as f:
+                th_key = json.load(f).get('tikhub_key', '')
+            if th_key and len(th_key) >= 20:
+                result.append({
+                    'id': 'tikhub',
+                    'label': 'TikHub（社媒数据采集）',
+                    'baseUrl': 'https://api.tikhub.io',
+                    'apiKey': th_key,
+                    'quotaApi': 'https://api.tikhub.io/api/v1/tikhub/user/get_user_info',
+                    'quotaType': 'tikhub_balance',
+                })
+        except Exception:
+            pass  # config读不到 → 不展示TikHub卡片，不影响其他provider
         return result
     except Exception as e:
         return []
@@ -2160,6 +2176,51 @@ class H(http.server.SimpleHTTPRequestHandler):
             else:
                 self._send_json(502, {'error': str(e), 'cached': False})
 
+    def _proxy_tikhub(self, api_key, provider_id):
+        """TikHub 余额（2026-11-19）：GET api.tikhub.io/api/v1/tikhub/user/get_user_info（Bearer）。
+        实测直连可达（不走代理）；凭证只进请求头，响应仅透出余额/免费额度/账号状态（email等不透出）。
+        缓存/超时fallback同 _proxy_quota（60s TTL+旧缓存兑底）。"""
+        now = time.time()
+        with _quota_cache_lock:
+            c = _quota_cache.get(provider_id)
+            if c and now - c[0] < _QUOTA_CACHE_TTL:
+                self._send_json(200, c[1])
+                return
+            stale_cache = c
+        try:
+            # 🔴 TikHub WAF按TLS指纹拦截Python默认指纹（issue-0379，实测urllib直连403/curl过）
+            # → curl_cffi impersonate chrome；status/code双校验，非200拖出走兑底
+            from curl_cffi import requests as cffi_requests
+            r = cffi_requests.get('https://api.tikhub.io/api/v1/tikhub/user/get_user_info',
+                headers={'Authorization': 'Bearer ' + api_key},
+                impersonate='chrome', timeout=10)
+            if r.status_code != 200:
+                raise ValueError('TikHub API HTTP %d' % r.status_code)
+            d = r.json()
+            if (d or {}).get('code') != 200:
+                raise ValueError('TikHub业务码异常: %r' % (d or {}).get('code'))
+            u = (d or {}).get('user_data') or {}
+            balance = u.get('balance')
+            free_credit = u.get('free_credit')
+            if not isinstance(balance, (int, float)):
+                raise ValueError('balance字段缺失或非数值: %r' % (balance,))
+            active = bool(u.get('is_active')) and not bool(u.get('account_disabled'))
+            data = {'balance': float(balance),
+                    'freeCredit': float(free_credit) if isinstance(free_credit, (int, float)) else 0.0,
+                    'active': active}
+            with _quota_cache_lock:
+                _quota_cache[provider_id] = (now, data)
+            self._send_json(200, data)
+        except Exception as e:
+            msg = str(e)
+            if stale_cache:
+                d2 = dict(stale_cache[1]); d2['cached'] = True
+                self._send_json(200, d2)
+            elif ('imeout' in msg) or ('timed out' in msg):
+                self._send_json(504, {'error': 'TikHub API超时: ' + msg, 'cached': False})
+            else:
+                self._send_json(502, {'error': msg, 'cached': False})
+
     def _proxy_codex(self, provider_id):
         """Codex 用量（2026-11-10）：GET chatgpt.com/backend-api/codex/usage（ChatGPT OAuth）。
         每次现读 ~/.codex/auth.json（令牌自动续期后无需改配置）；缓存/超时fallback同 _proxy_quota（60s TTL+旧缓存兑底）。"""
@@ -2333,6 +2394,8 @@ class H(http.server.SimpleHTTPRequestHandler):
                 return
             if p['quotaType'] == 'runpod_gpu':
                 self._proxy_runpod(p['apiKey'], pid)
+            elif p['quotaType'] == 'tikhub_balance':
+                self._proxy_tikhub(p['apiKey'], pid)
             elif p['quotaType'] == 'codex_usage':
                 self._proxy_codex(pid)
             else:

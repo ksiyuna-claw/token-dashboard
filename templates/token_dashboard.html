@@ -608,6 +608,27 @@ async function fetchProviderQuotas() {
         } else {
           cards.push(renderNoQuota(p.label, host, 'API返回异常'));
         }
+      } else if (p.quotaType === 'tikhub_balance') {
+        if (j.balance !== undefined) {
+          const bal = parseFloat(j.balance);
+          const fc = parseFloat(j.freeCredit || 0);
+          if (!isFinite(bal)) {  // 非法值fail-closed，不伪装0
+            cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+          } else {
+            const acctTag = j.active === false ? '<span class="tag tag-red">账号异常</span>' : '<span class="tag tag-green">账号正常</span>';
+            let rows = '<div class="quota-row"><div><div class="label">余额（USD）</div></div><div class="value" style="color:var(--green)">$' + bal.toFixed(2) + '</div></div>';
+            if (isFinite(fc) && fc > 0) {
+              rows += '<div class="quota-row"><div><div class="label">免费额度（USD）</div></div><div class="value">$' + fc.toFixed(2) + '</div></div>';
+            }
+            cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费（社媒API）</div>' +
+              rows +
+              '<div class="quota-row" style="border:none"><div></div>' + acctTag + '</div></div>');
+          }
+        } else if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
+        } else {
+          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+        }
       } else if (p.quotaType === 'codex_usage') {
         if (j.primaryWindow && j.primaryWindow.usedPercent != null) {
           const planName = {'prolite':'Pro Lite','pro':'Pro','plus':'Plus','free':'Free'}[j.plan] || (j.plan || '').toUpperCase();
