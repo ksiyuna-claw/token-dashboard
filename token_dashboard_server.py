@@ -303,6 +303,9 @@ PROVIDER_QUOTA_API = {
     # 'api.minimaxi.com': ('https://api.minimaxi.com/v1/token_plan/remains', 'minimax_quota'),
     'api.moonshot.cn': ('https://api.moonshot.cn/v1/users/me/balance', 'kimi_balance'),
     'api.kimi.com': ('https://api.kimi.com/coding/v1/usages', 'kimi_coding_plan'),
+    # NeuroSpark（2026-11-20 匡书记指令：用量/消费上额度板块；后付费模式无余额端点，
+    # /v1/usage 提供总消费/今日消费/调用量/分模型spend；WAF拦urllib→代理方法内 curl_cffi）
+    'api.neuro-spark.ai': ('https://api.neuro-spark.ai/v1/usage', 'neurospark_usage'),
     # dashscope（阿里云百炼）是语音/声图模型（ASR/TTS/文生图），非 LLM 文本生成，
     # Token 看板只看 LLM 用量，故不在此注册 → _get_providers() 会跳过它，看板不展示。
     # （openclaw.json 里的 dashscope provider 必须保留，它供语音/声图调用，与本看板无关）
@@ -312,6 +315,7 @@ PROVIDER_LABELS = {
     'zhipu': '智谱 BigModel（国内）',
     'zai': '智谱 BigModel（海外）',
     'deepseek': 'DeepSeek',
+    'neurospark': 'NeuroSpark（Claude/GLM中转）',
     # 2026-07-23 MiniMax套餐到期下线，代码保留备用
     # 'minimax': 'MiniMax（编程套餐）',
     'kimi': 'Kimi（Moonshot）',
@@ -2221,6 +2225,68 @@ class H(http.server.SimpleHTTPRequestHandler):
             else:
                 self._send_json(502, {'error': msg, 'cached': False})
 
+    def _proxy_neurospark(self, api_key, provider_id):
+        """NeuroSpark 用量/消费（2026-11-20）：GET api.neuro-spark.ai/v1/usage（Bearer）。
+        后付费模式无余额端点（dashboard/credits/billing 族全 404 实测）——卡片展示累计/今日消费+调用量+分模型spend。
+        🔴 WAF 拦 urllib（实测403）→ curl_cffi impersonate chrome（TikHub issue-0379 同族）；
+        凭证只进请求头，响应不含 key/customer_id/account_id。缓存/兑底同 _proxy_quota。"""
+        now = time.time()
+        with _quota_cache_lock:
+            c = _quota_cache.get(provider_id)
+            if c and now - c[0] < _QUOTA_CACHE_TTL:
+                self._send_json(200, c[1])
+                return
+            stale_cache = c
+        try:
+            from curl_cffi import requests as cffi_requests
+            r = cffi_requests.get('https://api.neuro-spark.ai/v1/usage',
+                headers={'Authorization': 'Bearer ' + api_key},
+                impersonate='chrome', timeout=10)
+            if r.status_code != 200:
+                raise ValueError('NeuroSpark API HTTP %d' % r.status_code)
+            d = r.json()
+            if not isinstance(d, dict) or 'total_spend' not in d:
+                raise ValueError('NeuroSpark响应结构异常: 缺total_spend')
+            def _strict(v, name):
+                # R1修复(2026-11-20 R1审)：核心字段非法即报错（bool是int子类先排；仅接受有限非负数值），
+                # 禁止默认值0掩盖异常（total_spend='abc'曾伪装成$0真实消费）
+                import math
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+                    raise ValueError('NeuroSpark字段%s非法: %r' % (name, v))
+                return float(v)
+            # 模型行策略：非法行跳过不展示（展示层过滤），顶层核心字段非法抛错走兑底/502
+            # R1修复(round3)：spend/calls 加 math.isfinite——Infinity/NaN 行直接跳过，
+            # 防 inf 进 topModels 被 json.dumps 输出非标准 Infinity 破坏 r.json() 且污染缓存
+            import math as _math
+            used = [x for x in (d.get('rows') or [])
+                    if isinstance(x, dict) and isinstance(x.get('spend'), (int, float))
+                    and not isinstance(x.get('spend'), bool)
+                    and _math.isfinite(float(x['spend'])) and float(x['spend']) > 0]
+            used.sort(key=lambda x: -float(x['spend']))
+            def _row_calls(v):
+                return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                    and _math.isfinite(v) and v >= 0 else 0
+            data = {'totalSpend': _strict(d.get('total_spend'), 'total_spend'),
+                    'todaySpend': _strict(d.get('today_spend'), 'today_spend'),
+                    'totalCalls': int(_strict(d.get('total_calls'), 'total_calls')),
+                    'todayCalls': int(_strict(d.get('today_calls'), 'today_calls')),
+                    'topModels': [{'model': str(x.get('model') or '?')[:40],
+                                   'spend': float(x['spend']),
+                                   'calls': _row_calls(x.get('calls'))}
+                                  for x in used[:3]]}
+            with _quota_cache_lock:
+                _quota_cache[provider_id] = (now, data)
+            self._send_json(200, data)
+        except Exception as e:
+            msg = str(e)
+            if stale_cache:
+                d2 = dict(stale_cache[1]); d2['cached'] = True
+                self._send_json(200, d2)
+            elif ('imeout' in msg) or ('timed out' in msg):
+                self._send_json(504, {'error': 'NeuroSpark API超时: ' + msg, 'cached': False})
+            else:
+                self._send_json(502, {'error': msg, 'cached': False})
+
     def _proxy_codex(self, provider_id):
         """Codex 用量（2026-11-10）：GET chatgpt.com/backend-api/codex/usage（ChatGPT OAuth）。
         每次现读 ~/.codex/auth.json（令牌自动续期后无需改配置）；缓存/超时fallback同 _proxy_quota（60s TTL+旧缓存兑底）。"""
@@ -2396,6 +2462,8 @@ class H(http.server.SimpleHTTPRequestHandler):
                 self._proxy_runpod(p['apiKey'], pid)
             elif p['quotaType'] == 'tikhub_balance':
                 self._proxy_tikhub(p['apiKey'], pid)
+            elif p['quotaType'] == 'neurospark_usage':
+                self._proxy_neurospark(p['apiKey'], pid)
             elif p['quotaType'] == 'codex_usage':
                 self._proxy_codex(pid)
             else:

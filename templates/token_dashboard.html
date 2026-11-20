@@ -229,9 +229,9 @@
 <script>
 const REFRESH_MS = 5 * 60 * 1000;
 
-const AGENT_ORDER = ['main','xiaohexia','jiweixia','pipixia','caoxia','banjiexia','duijiaoxia','shanbei','hailuo','haixing','haima','yoooclaw'];
-const AGENT_NAMES = {main:'罗氏虾',xiaohexia:'小河虾',jiweixia:'基围虾',pipixia:'皮皮虾',caoxia:'草虾',banjiexia:'斑节虾',duijiaoxia:'对焦虾',shanbei:'扇贝',hailuo:'海螺',haixing:'海星',haima:'海马',yoooclaw:'YoooClaw'};
-const AGENT_EMOJI = {main:'🦞',xiaohexia:'🦐',jiweixia:'🏙',pipixia:'🦐',caoxia:'🦐',banjiexia:'🦐',duijiaoxia:'🔍',shanbei:'🦪',hailuo:'🐚',haixing:'⭐',haima:'🔱',yoooclaw:'🐾'};
+const AGENT_ORDER = ['main','xiaohexia','jiweixia','pipixia','caoxia','banjiexia','duijiaoxia','shanbei','hailuo','haixing','haima','yoooclaw','linxia'];
+const AGENT_NAMES = {main:'罗氏虾',xiaohexia:'小河虾',jiweixia:'基围虾',pipixia:'皮皮虾',caoxia:'草虾',banjiexia:'斑节虾',duijiaoxia:'对焦虾',shanbei:'扇贝',hailuo:'海螺',haixing:'海星',haima:'海马',yoooclaw:'YoooClaw',linxia:'磷虾'};
+const AGENT_EMOJI = {main:'🦞',xiaohexia:'🦐',jiweixia:'🏙',pipixia:'🦐',caoxia:'🦐',banjiexia:'🦐',duijiaoxia:'🔍',shanbei:'🦪',hailuo:'🐚',haixing:'⭐',haima:'🔱',yoooclaw:'🐾',linxia:'🦐'};
 const PROVIDER_LABELS = {
   /* 2026-08-07 海外智谱Coding Plan到期下线，代码保留备用 */
   // zai: {text:'海外', cls:'provider-tag-zai'},
@@ -623,6 +623,30 @@ async function fetchProviderQuotas() {
             cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费（社媒API）</div>' +
               rows +
               '<div class="quota-row" style="border:none"><div></div>' + acctTag + '</div></div>');
+          }
+        } else if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
+        } else {
+          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+        }
+      } else if (p.quotaType === 'neurospark_usage') {
+        if (j.totalSpend !== undefined) {
+          const ts = parseFloat(j.totalSpend), td = parseFloat(j.todaySpend);
+          const tc = parseInt(j.totalCalls, 10) || 0, dc = parseInt(j.todayCalls, 10) || 0;
+          if (!isFinite(ts)) {  // 非法值fail-closed
+            cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+          } else {
+            let rows = '<div class="quota-row"><div><div class="label">累计消费（USD）</div></div><div class="value">$' + ts.toFixed(4) + '</div></div>' +
+              '<div class="quota-row"><div><div class="label">今日消费</div></div><div class="value">$' + (isFinite(td) ? td.toFixed(4) : '0.0000') + ' · ' + dc + '次</div></div>';
+            (j.topModels || []).forEach(function(m) {
+              const sp = parseFloat(m.spend);
+              if (isFinite(sp) && sp > 0) {
+                rows += '<div class="quota-row"><div><div class="label">' + mEsc(m.model || '?') + '</div></div><div class="value">$' + sp.toFixed(4) + ' · ' + (parseInt(m.calls, 10) || 0) + '次</div></div>';
+              }
+            });
+            cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 后付费（按量计费）</div>' +
+              rows +
+              '<div class="quota-row" style="border:none"><div></div><span class="tag">共' + tc + '次调用</span></div></div>');
           }
         } else if (j.error) {
           cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
