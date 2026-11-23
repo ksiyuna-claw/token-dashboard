@@ -803,6 +803,9 @@ def _get_providers():
                 })
         except Exception:
             pass  # config读不到 → 不展示TikHub卡片，不影响其他provider
+        # 2026-11-23 匡书记布局指令：Codex首位、DeepSeek末位，其余保持原相对序（等高卡片目标）
+        _first = ['codex']; _last = ['deepseek']
+        result.sort(key=lambda p: (0 if p['id'] in _first else 2 if p['id'] in _last else 1))
         return result
     except Exception as e:
         return []

@@ -637,20 +637,14 @@ async function fetchProviderQuotas() {
         if (j.totalSpend !== undefined) {
           const ts = parseFloat(j.totalSpend), td = parseFloat(j.todaySpend);
           const tc = parseInt(j.totalCalls, 10) || 0, dc = parseInt(j.todayCalls, 10) || 0;
-          if (!isFinite(ts)) {  // 非法值fail-closed
+          if (!isFinite(ts)) {
             cards.push(renderNoQuota(p.label, host, 'API返回异常'));
           } else {
-            let rows = '<div class="quota-row"><div><div class="label">累计消费（USD）</div></div><div class="value">$' + ts.toFixed(4) + '</div></div>' +
-              '<div class="quota-row"><div><div class="label">今日消费</div></div><div class="value">$' + (isFinite(td) ? td.toFixed(4) : '0.0000') + ' · ' + dc + '次</div></div>';
-            (j.topModels || []).forEach(function(m) {
-              const sp = parseFloat(m.spend);
-              if (isFinite(sp) && sp > 0) {
-                rows += '<div class="quota-row"><div><div class="label">' + mEsc(m.model || '?') + '</div></div><div class="value">$' + sp.toFixed(4) + ' · ' + (parseInt(m.calls, 10) || 0) + '次</div></div>';
-              }
-            });
-            cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 后付费（按量计费）</div>' +
-              rows +
-              '<div class="quota-row" style="border:none"><div></div><span class="tag">共' + tc + '次调用</span></div></div>');
+            // 1123迭代③（好好设计）：主数值只留短数（累计$X），辅信息降级小字行——层级清晰不拥挤
+            let rows = '<div class="quota-row"><div><div class="label">累计消费（USD）</div></div><div class="value" style="color:var(--green)">$' + ts.toFixed(4) + '</div></div>' +
+              '<div class="quota-row" style="border:none;padding:1px 0"><div></div><div style="font-size:10px;color:var(--dim)">今日 $' + (isFinite(td) ? td.toFixed(4) : '0.0000') + ' · 共' + tc + '次调用 · 后付费</div></div>';
+            cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 余额见控制台</div>' +
+              rows + '</div>');
           }
         } else if (j.error) {
           cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
