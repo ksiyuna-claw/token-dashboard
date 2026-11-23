@@ -118,7 +118,7 @@
   .agent-card .ac-mchip { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; line-height: 1.5; white-space: nowrap; }
   .agent-card .ac-mchip em { font-style: normal; font-weight: 500; font-size: 10px; opacity: 0.7; margin-left: 2px; }
   /* 压缩模式（模型≥3）：色点 + 首字母，hover 看全名 */
-  .agent-card .ac-mchip-mini { display: inline-flex; align-items: center; gap: 3px; padding: 1px 5px 1px 4px; }
+  .agent-card .ac-mchip-mini { display: inline-flex; align-items: center; gap: 3px; padding: 1px 5px 1px 4px; min-width: 0; overflow: hidden; } /* 2026-11-24：标签变长时整行等比收紧，不再把最右侧标签整块挤出可视区 */
   .agent-card .ac-mdot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
   /* 当前（最新调用）模型：循环光扫标识“正在跑” */
   .agent-card .ac-mchip-cur { position: relative; overflow: hidden; }
@@ -352,6 +352,10 @@ function modelAbbr(model) {
   if (m.includes('deepseek')) return 'DS';
   // flash 先判：压缩模式下与 glm-5.3 同显'GLM'无法区分（2026-08-27 flash灰度期新增）
   if (m.includes('glm') && m.includes('flash')) return 'Flash';
+  /* 2026-11-24 匡书记同意：glm 缩写带版本号，glm-5.4 与 glm-5.3 不再同显'GLM'。
+     按模型名里的版本号生成（glm-5.4→GLM5.4），无版本号的 glm 名仍兜底'GLM' */
+  const glmVer = m.match(/glm-(\d+(?:\.\d+)?)/);
+  if (glmVer) return 'GLM' + glmVer[1];
   if (m.includes('glm')) return 'GLM';
   if (m.includes('qwen') || m.includes('千问') || m.includes('tongyi')) return 'QW';
   /* 2026-07-23 MiniMax套餐到期下线，代码保留备用 */
