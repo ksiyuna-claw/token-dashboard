@@ -2,6 +2,8 @@
 
 ## 修改前先读
 
+员工工作状态的原始要求与现行认定办法见[本人、分身和后台程序](docs/decisions/0007-员工工作状态.md)。
+
 额度板块的布局曾因实看效果撤回；改版时对照董事长的原意、撤回原因和当次验证。
 
 [变更说明_20261123_额度板块布局调整.md](<变更说明_20261123_额度板块布局调整.md>) · [CHANGELOG.md](<CHANGELOG.md>)
@@ -24,7 +26,7 @@
 
 | 区块 | 内容（代码实锤） | 数据源 |
 |------|------|--------|
-| 🦐 虾厂员工 | 12虾agent卡片（模型chips+工作状态动画光效）+7个tab：主会话/心跳/子代理/Slash/微信Bot/系统/全部 | `/agent-status`（15秒轮询）+ `/sessions-json` |
+| 🦐 虾厂员工 | 13 位员工卡片。分别显示本人、分身或后台程序工作、等待审核／云端结果、空闲或状态待确认，保留模型标签+7个tab：主会话/心跳/子代理/Slash/微信Bot/系统/全部 | `/agent-status`（15秒轮询）+ `/sessions-json` |
 | 📦 模型供应商额度 | 智谱国内/Kimi/DeepSeek 额度卡片 + **RunPod GPU云卡片**（2026-10-28上线：余额USD + 活跃pod数/每pod小时成本，服务端额度缓存60s） + **TikHub社媒API余额卡**（2026-11-19上线：余额USD/免费额度/账号状态；TikHub WAF按TLS指纹拦urllib→curl_cffi impersonate chrome，issue-0379同款根治） + **NeuroSpark用量卡**（2026-11-20上线：累计/今日消费+调用量+分模型spend top3，后付费模式） | `/providers` 列表 + `/quota/<id>` 代理各家官方API（5分钟轮询）；RunPod=GraphQL clientBalance + REST v2 /v2/pods 合成，key在项目config.json（非LLM provider，静态注入，gitignore已忽略）；TikHub=user_data.balance，key同在config.json；NeuroSpark=/v1/usage（后付费无余额端点，展示累计/今日消费+分模型spend，WAF同拦urllib→curl_cffi，apiKey从openclaw.json现读） |
 | 📦 Hermes 网关健康（2026-10-14 独立成区块，位于邮箱监控之前） | 进程状态 + 心跳 + watchdog触发记录 + **TG通道状态四态**（connected ✅绿 / retrying（Xs未恢复）黄 / 冻结 ⚠️红告警醒目 / unknown ❓灰）；纯读展示零探测逻辑，四态判定全在后端 | `/agent-status` 的 `hermesHealth`（新增 `tg_state`/`tg_state_age` 字段，15秒轮询）；同源 watchdog v5.2（30min双信号自愈：进程+心跳+TG状态）读 `~/.hermes/gateway_state.json` |
 | 📬 邮箱监控 | 未读邮件状态 | `email_monitor.py`（系统crontab每30分钟）写 `data/email_status.json` → `/email-status` |

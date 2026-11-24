@@ -282,15 +282,12 @@ _CACHE_TTL = 15  # 缓存有效期（秒）
 _sessions_cache = {'data': None, 'ts': 0}  # openclaw sessions --json 结果缓存
 _sessions_lock = threading.Lock()
 
-# ── WS 实时状态：Gateway WebSocket 事件维护的 agent 活动状态 ────────────────────
-# 当 WS 收到 agent 相关事件时，记录 agentId → 最后活动时间戳
-_agent_ws_activity = {}  # {agentId: last_activity_ms}
-# Gateway sessions.changed 事件的 hasActiveRun 字段 → 精确的"模型正在思考"信号
-# Y3(2026-09-11)：改为 sessionKey 维度——按 agentId 存/删会把同 agent 并发 session 的
-# 标记互相覆盖/误清（主会话 run 结束 pop 掉还在跑的 subagent/cron 标记），消费端聚合回 agentId
-_agent_active_runs = {}  # {sessionKey: True}
-_ws_thread = None
-_ws_connected = False
+from pathlib import Path
+from dashboard_activity import activity_feed
+from dashboard_background import BackgroundWork
+from dashboard_status import ReviewWaits, public_activity
+
+_sessions_refresh_lock = threading.Lock()
 
 # ── Provider 额度 API 映射 ──────────────────────────────
 # baseUrl 模式匹配 → (额度API URL, 类型)
@@ -334,6 +331,8 @@ HIDDEN_PROVIDERS = {'zai'}
 
 # 从 transcript 读实际调用模型（session 元数据的 model 是配置值，不准）
 AGENTS_DIR = os.path.join(os.path.expanduser('~'), '.openclaw/agents')
+background_work = BackgroundWork(AGENTS_DIR)
+review_waits = ReviewWaits(Path(AGENTS_DIR).parent)
 # 🔄 2026-06-24 改造：从「只读最后一条模型」→「读最近 N 条 assistant 消息的模型分布 + 时间戳」
 #   原因：单条快照在 glm-5.2 限流 fallback 到 deepseek 时会乱跳，看着像「当前模型不准」。
 #   现在统计最近 N 条的分布，让人一眼看出「主力是谁、偶尔 fallback 几次」。
@@ -1163,13 +1162,38 @@ def _refresh_updated_at_from_sqlite(data):
                 s['updatedAt'] = upd
     return data
 
-def _get_cached_sessions():
-    """获取缓存的 sessions 数据，每15秒刷新一次。线程安全。"""
-    now = time.time()
-    with _sessions_lock:
-        if _sessions_cache['data'] is not None and now - _sessions_cache['ts'] < _CACHE_TTL:
-            return _sessions_cache['data']
-    # 刷新缓存
+def _get_cached_sessions(nonblocking=False):
+    """Session history has a separate refresh from the live activity feed."""
+    def cached():
+        with _sessions_lock:
+            data = _sessions_cache['data']
+            age = time.time() - _sessions_cache['ts']
+            if data is not None and age < _CACHE_TTL:
+                return data, True
+            result = dict(data or {'sessions': []}, _stale=True)
+            if data is not None:
+                result['_staleAgeSec'] = int(age)
+            return result, time.time() < _sessions_cache.get('retryAfter', 0)
+
+    def refresh():
+        try:
+            data, current = cached()
+            return data if current else _refresh_sessions()
+        finally:
+            _sessions_refresh_lock.release()
+
+    data, current = cached()
+    if current:
+        return data
+    if nonblocking:
+        if _sessions_refresh_lock.acquire(blocking=False):
+            threading.Thread(target=refresh, daemon=True, name='dashboard-sessions').start()
+        return data
+    _sessions_refresh_lock.acquire()
+    return refresh()
+
+
+def _refresh_sessions():
     try:
         r = subprocess.run(
             ['openclaw', 'sessions', '--json', '--all-agents', '--limit', '50'],
@@ -1185,7 +1209,7 @@ def _get_cached_sessions():
                 x['ageMs'] = now_ms - x['updatedAt']
         with _sessions_lock:
             _sessions_cache['data'] = data
-            _sessions_cache['ts'] = now
+            _sessions_cache['ts'] = time.time()
         return data
     except Exception as e:
         # 返回旧缓存（如果有）或空数据
@@ -1194,6 +1218,7 @@ def _get_cached_sessions():
         # Y5(2026-09-11)：回退旧缓存时在响应体顶层加 _stale/_staleAgeSec 字段——前端可见「数据滞后」
         # 角标（0266 界面层复现路径的补口），不再无痕定格。浅拷贝顶层 dict 避免污染缓存本体。
         with _sessions_lock:
+            _sessions_cache['retryAfter'] = time.time() + _CACHE_TTL
             if _sessions_cache['data'] is not None:
                 stale_age = time.time() - _sessions_cache['ts']
                 logging.warning(f'[CACHE] sessions CLI失败，回退旧缓存（已陈旧{stale_age:.0f}s）: {type(e).__name__}: {e}')
@@ -1205,215 +1230,37 @@ def _get_cached_sessions():
             return {'sessions': [], 'error': str(e)}
 
 
-def _parse_agent_id_from_session_key(key):
-    """从 session key 中提取 agentId。key 格式: agent:<agentId>:<channel>:..."""
-    if not key or not key.startswith('agent:'):
-        return None
-    parts = key.split(':')
-    if len(parts) >= 2:
-        return parts[1]
-    return None
-
-
 def _ws_listener_loop():
-    """后台线程：连接 Gateway WebSocket，监听 agent 活动事件。
-
-    基于 CEO 验证过的测试脚本逻辑重写（2026-06-20）。
-    关键：subscribe 响应循环和事件监听循环都用 while True 跳过非 res/event 消息。
-    """
-    global _ws_connected
+    """Use one local connection for session events, complete snapshots and owned background work."""
     import asyncio
+    import websockets
+    from dashboard_activity import BackgroundSampler, watch_connection
 
-    async def _ws_run():
-        global _ws_connected
-        import websockets
-
-        ws_url = 'ws://127.0.0.1:18789/'
-
-        while True:  # 外层重连循环
-            # Y6(2026-09-11)：token 每次重连重读——原只在线程启动时读一次，token 轮换后
-            # WS 永久失联（connect 永远 401，每 10s 空转重试，服务进程长期不重启则风险累积）。
-            # 无 token 时不再 abort 线程（原 return 后 WS 永久死掉），等 60s 重试等配置出现。
+    async def reconnect(sampler):
+        while True:
             token = _get_gateway_token()
             if not token:
-                logging.error('[WS] no gateway token yet, retry in 60s')
+                logging.warning('[WS] no gateway token yet, retry in 60s')
                 await asyncio.sleep(60)
                 continue
             try:
-                async with websockets.connect(ws_url, ping_interval=None, ping_timeout=None) as ws:
-                    # 1. 接收 challenge nonce
-                    msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                    challenge = json.loads(msg)
-                    logging.info(f'[WS] got challenge: {challenge.get("type", "?")}')
+                async with websockets.connect('ws://127.0.0.1:18789/', ping_interval=20, ping_timeout=20) as ws:
+                    await watch_connection(ws, token, activity_feed, sampler)
+            except Exception as exc:
+                activity_feed.connection(False)
+                _log_ws_error(exc)
+            await asyncio.sleep(10)
 
-                    # 2. 发送 connect RPC
-                    connect_id = str(uuid.uuid4())
-                    await ws.send(json.dumps({
-                        'type': 'req',
-                        'id': connect_id,
-                        'method': 'connect',
-                        'params': {
-                            'minProtocol': 3,
-                            'maxProtocol': 4,
-                            'client': {
-                                'id': 'gateway-client',
-                                'version': '1.0.0',
-                                'platform': 'darwin',
-                                'mode': 'backend',
-                            },
-                            'caps': ['tool-events'],
-                            'auth': {'token': token},
-                            'role': 'operator',
-                            'scopes': ['operator.read', 'operator.write', 'operator.admin'],
-                        },
-                    }))
+    async def run():
+        sampler = BackgroundSampler(background_work)
+        sampler_task = asyncio.create_task(sampler.run())
+        try:
+            await reconnect(sampler)
+        finally:
+            sampler_task.cancel()
+            await asyncio.gather(sampler_task, return_exceptions=True)
 
-                    # 循环读直到拿到 connect 的 res（跳过插队消息）
-                    while True:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                        data = json.loads(msg)
-                        if data.get('type') == 'res' and data.get('id') == connect_id:
-                            if not data.get('ok'):
-                                logging.error(f'[WS] connect failed: {data}')
-                                await asyncio.sleep(10)
-                                break  # 跳出内层 while，外层 while 会重连
-                            logging.info('[WS] connect ok')
-                            break
-                        # 跳过非 res 消息（如插队的 health event）
-
-                    # 3. 发送 sessions.subscribe
-                    sub_id = str(uuid.uuid4())
-                    await ws.send(json.dumps({
-                        'type': 'req',
-                        'id': sub_id,
-                        'method': 'sessions.subscribe',
-                        'params': {},
-                    }))
-
-                    # 循环读直到拿到 subscribe 的 res（跳过插队的 health 等事件）
-                    while True:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                        data = json.loads(msg)
-                        if data.get('type') == 'res' and data.get('id') == sub_id:
-                            logging.info(f'[WS] sessions.subscribe ok={data.get("ok")}')
-                            break
-                        # 跳过插队的 health / event 等消息
-
-                    _ws_connected = True
-                    logging.info('[WS] connected and subscribed, listening for events...')
-
-                    # 重连后同步状态：以 Gateway 为准重建 active runs
-                    sync_id = str(uuid.uuid4())
-                    await ws.send(json.dumps({
-                        'type': 'req',
-                        'id': sync_id,
-                        'method': 'sessions.list',
-                        'params': {},
-                    }))
-                    while True:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                        data = json.loads(msg)
-                        if data.get('type') == 'res' and data.get('id') == sync_id:
-                            if not data.get('ok'):
-                                # Y1(2026-09-11)：sync 失败保留旧状态——原无 ok 检查，
-                                # 失败响应（result 为空）同样走到 clear → 活动状态归零。
-                                # 超时异常路径本来就不 clear（跳外层重连），但失败响应路径必须拦。
-                                logging.warning(f'[WS] reconnect sync not ok, keep old state: {str(data)[:200]}')
-                                break
-                            sessions = data.get('result', {}).get('sessions', [])
-                            _agent_active_runs.clear()
-                            _agent_ws_activity.clear()
-                            now_ms_sync = int(time.time() * 1000)
-                            for s in sessions:
-                                if s.get('hasActiveRun'):
-                                    sk = s.get('sessionKey', '')
-                                    aid = _parse_agent_id_from_session_key(sk) or s.get('agentId', '')
-                                    if sk:
-                                        _agent_active_runs[sk] = True  # Y3: sessionKey 维度
-                                    if aid:
-                                        _agent_ws_activity[aid] = now_ms_sync
-                            logging.info(f'[WS] reconnect sync ok: {len(_agent_active_runs)} active session windows')
-                            break
-                        # 跳过插队消息
-
-                    # 4. 事件监听循环
-                    while True:
-                        # --- WS 传输层：recv + json.loads ---
-                        try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=60.0)
-                        except asyncio.TimeoutError:
-                            continue
-                        except Exception as e:
-                            _log_ws_error(e)
-                            break  # WS 断开/死亡 → 让外层重连
-
-                        # --- 事件处理层：解析 + 更新状态 ---
-                        try:
-                            data = json.loads(msg)
-
-                            if data.get('type') != 'event':
-                                continue
-
-                            evt = data.get('event', '')
-                            payload = data.get('payload', {})
-                            now_ms = int(time.time() * 1000)
-
-                            if evt == 'health':
-                                continue  # 忽略心跳
-
-                            # sessions.changed 事件携带 hasActiveRun — 这是精确的
-                            # "模型正在思考/运行"信号，来自 Gateway 内部的 chatAbortControllers
-                            if evt == 'sessions.changed':
-                                session_key = payload.get('sessionKey', '')
-                                agent_id = _parse_agent_id_from_session_key(session_key)
-                                if not agent_id:
-                                    agent_id = payload.get('agentId', '')
-                                has_active_run = payload.get('hasActiveRun')
-                                if has_active_run is not None and (session_key or agent_id):
-                                    if has_active_run:
-                                        # Y3(2026-09-11)：run 标记改 sessionKey 维度——原按 agentId
-                                        # 存/删，主会话 run 结束会把同 agent 其他还在跑的
-                                        # session（cron/心跳/子代理）标记一并 pop → working→idle→working 抖动
-                                        if session_key:
-                                            _agent_active_runs[session_key] = True
-                                        if agent_id:
-                                            _agent_ws_activity[agent_id] = now_ms
-                                        logging.info(f'[WS] sessions.changed → {session_key or agent_id} hasActiveRun={has_active_run} (processed OK)')
-                                    else:
-                                        # 只清本 session 的 run 标记；不刷新真实活动时间。
-                                        # 修复(2026-11-03)：旧失败/历史会话（status=failed、
-                                        # subagentRunState=historical）每约60秒发一次
-                                        # hasActiveRun=False，原逻辑在 False 分支也更新
-                                        # _agent_ws_activity，导致30s WS窗口周期性误亮working。
-                                        # 终态/历史状态不是工作活动证据，只清标记。
-                                        _agent_active_runs.pop(session_key, None)
-                                        logging.info(f'[WS] sessions.changed → {session_key or agent_id} hasActiveRun={has_active_run} (processed OK, no activity refresh)')
-                                continue
-
-                            # 其他非 health 事件都尝试提取 agentId
-                            session_key = payload.get('sessionKey', '')
-                            agent_id = _parse_agent_id_from_session_key(session_key)
-                            if not agent_id:
-                                agent_id = payload.get('agentId', '')
-                            if agent_id:
-                                _agent_ws_activity[agent_id] = now_ms
-                                logging.debug(f'[WS] {evt} → {agent_id} active')
-                            else:
-                                logging.debug(f'[WS] {evt} (no agentId)')
-
-                        except Exception as e:
-                            _log_ws_error(e)
-                            continue  # 跳过这条坏事件，继续监听下一条（不 break 重连）
-
-            except Exception as e:
-                _ws_connected = False
-                logging.error(f'[WS] disconnected: {e}, reconnecting in 10s...')
-                await asyncio.sleep(10)
-
-    try:
-        asyncio.run(_ws_run())
-    except Exception as e:
-        logging.warning(f'[WS] fatal (rate-limited): {type(e).__name__}: {str(e)[:200]}')
+    asyncio.run(run())
 
 
 def _get_gateway_token():
@@ -1426,14 +1273,7 @@ def _get_gateway_token():
         return ''
 
 
-# ── 进程快照与 Gateway 进程树归属（2026-08-20 exec归因修复）──────────────
-# 背景：系统 cron（twitter_monitor/巡检/邮件监控）跑在公共 workspace 路径下，
-# 旧逻辑按「命令行含 workspace 路径」归因 → cron 一启动就把罗氏虾误标 working。
-# 新逻辑：只有 PPID 链回溯到 Gateway 进程的才是虾的活跃 exec（进程树归属）；
-# cron/launchd 起的进程 PPID 链不通到 Gateway，天然排除。
-# 性能：单次 ps 快照 + 内存回溯，禁止逐级 ps 子调用；Gateway PID 每次实时解析、
-# 绝不缓存（launchd 托管，重启后 PID 必变）。
-
+# 系统任务栏和网关健康共享进程快照。员工卡的程序归属由 dashboard_background 核对。
 _PS_SNAPSHOT_TTL = 5  # 秒；两次 ps 之间的最短间隔（agent-status 轮询与任务栏线程共享同一次快照）
 _ps_snapshot_cache = {'rows': None, 'ts': 0.0}
 _ps_snapshot_lock = threading.Lock()
@@ -1511,60 +1351,6 @@ def _gateway_derived_pids(rows, gateway_pids):
                 break
             hops += 1
     return derived
-
-# workspace 路径 → agentId 归因标记（与旧版口径一致）
-_AGENT_PATH_MARKERS = {
-    'pipixia': ('workspace-pipixia', 'workspace_pipixia'),
-    'jiweixia': ('workspace-jiweixia', 'workspace_jiweixia'),
-    'xiaohexia': ('workspace-xiaohexia', 'workspace_xiaohexia'),
-    'yoooclaw': ('workspace-yoooclaw', 'workspace_yoooclaw'),
-    'banjiexia': ('workspace-banjiexia', 'workspace_banjiexia'),
-    'caoxia': ('workspace-caoxia', 'workspace_caoxia'),
-    'duijiaoxia': ('workspace-duijiaoxia', 'workspace_duijiaoxia'),
-}
-
-def _detect_active_process_agents():
-    """检测哪些 agent 有活跃的 exec 进程，返回 agentId set。
-
-    2026-08-20 重写为「进程树归属」（exec归因修复）：
-    - 旧逻辑按「命令行含 workspace 路径」归因，系统 cron（twitter_monitor/巡检/
-      邮件监控）恰好跑在公共 workspace 路径下 → cron 一启动就把罗氏虾误标 working。
-    - 新逻辑：只有 PPID 链回溯到 Gateway 进程的才是虾的活跃 exec；
-      cron/launchd 起的进程 PPID 链不通到 Gateway，天然排除。
-    - Gateway PID 每次从 ps 快照实时解析，绝不缓存（launchd 托管，重启后 PID 必变）。
-    - 性能：单次 ps 快照 + 内存回溯 PPID 链，无逐级 ps 子调用。
-    - Gateway 解析不到时安全降级：返回空集（本优先级不判任何虾 working）。
-    """
-    try:
-        rows = _ps_snapshot()
-        gw_pids = _find_gateway_pids(rows)
-        if not gw_pids:
-            # Y2 安全降级：解析不到 Gateway（重启窗口/ps异常）→ 本优先级跳过，
-            # 不算任何虾 working，交给 hasActiveRun/WS/age 三级兜底
-            return set()
-        derived = _gateway_derived_pids(rows, gw_pids)
-        active = set()
-        for pid, ppid, _et, _rss, cmd in rows:
-            if pid not in derived:
-                continue  # 非 Gateway 衍生（cron/launchd/常驻服务）→ 不归因任何虾
-            ll = cmd.lower()
-            # 只关注可能属于 agent exec 的进程类型（与旧版关键字口径一致）
-            if not any(kw in ll for kw in ['python3', 'python', '/node', 'node ', 'ffmpeg', 'kling']):
-                continue
-            # 排除看板自身（本服务进程不归因任何虾）
-            if 'token_dashboard' in ll:
-                continue
-            # 按命令行中的 workspace 路径归因到具体虾（与旧版路径口径一致）
-            for aid, markers in _AGENT_PATH_MARKERS.items():
-                if any(m in ll for m in markers):
-                    active.add(aid)
-            # CEO 的 workspace 是 workspace/（无后缀），单独匹配；
-            # 注意：workspace-xxx 已被上面处理，这里只匹配无后缀的 workspace/
-            if '/.openclaw/workspace/' in ll and 'workspace-' not in ll:
-                active.add('main')
-        return active
-    except Exception:
-        return set()
 
 # ── 系统任务栏（2026-08-20）：非Gateway衍生的定时任务进程可见性，仅看板网页可见，不进TG推送 ──
 # 语义边界：虾卡片 = LLM turn + Gateway衍生exec（token相关）；系统任务栏 = 机器上的
@@ -2480,71 +2266,24 @@ class H(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif self.path == '/agent-status':
-            """各虾实时工作状态"""
             try:
-                # 使用缓存数据（15秒刷新一次）
-                d = _get_cached_sessions()
+                d = _get_cached_sessions(nonblocking=True)
                 now = int(time.time() * 1000)
-
-                # === 进程检测：有活跃 exec 进程 = 确定在干活 ===
-                active_agents = _detect_active_process_agents()
-
-                # === hasActiveRun 精确信号：Gateway sessions.changed 事件 ===
-                # 这是 OpenClaw 内部的 chatAbortControllers 状态，
-                # 精确反映"模型正在生成回复"（即 Telegram 显示的 typing 状态）
-                # 优先级最高，覆盖模型思考窗口
-                # 安全 TTL：如果超过5分钟没有收到 hasActiveRun=False 事件，
-                # 认为信号可能丢失，降级到其他检测方式
-                active_run_agents = set()
-                active_run_stale_ms = 2 * 60 * 1000  # 2分钟安全 TTL（issue-0123：事件丢失时减少恢复延迟）
-                # Y3(2026-09-11)：_agent_active_runs 已改 sessionKey 维度，聚合回 agentId
-                # （该 agent 任一 session 窗口在跑 = working）
-                for sk in list(_agent_active_runs.keys()):
-                    _aid = _parse_agent_id_from_session_key(sk) or sk
-                    last_ts = _agent_ws_activity.get(_aid, 0)
-                    if now - last_ts < active_run_stale_ms:
-                        active_run_agents.add(_aid)
-                    else:
-                        # 超过2分钟没有刷新，清除可能泄漏的标记
-                        _agent_active_runs.pop(sk, None)
-
-                # === WS 实时活动检测：作为 hasActiveRun 的补充兜底 ===
-                # _agent_ws_activity 中有最近收到事件的 agentId → last_activity_ms
-                # 30秒内的 TTL，hasActiveRun 是精确信号，WS活动只做补充
-                ws_active_agents = set()
-                ws_threshold = 30 * 1000  # 30秒内有事件 = 活跃
-                for aid, ts in _agent_ws_activity.items():
-                    if now - ts < ws_threshold:
-                        ws_active_agents.add(aid)
-
-                # === 本地矫正（issue-86939）：Gateway 的 status 字段可能过时 ===
-                # 如果 agent 不在 active_run_agents 中，且 _agent_ws_activity 超过60秒没更新，
-                # 则认为该 agent 已经不在跑，即使 Gateway 的 status="running" 也是过时值。
-                # 在优先级链中跳过 working 判定，直接落到 age 检测。
-                local_correction_agents = set()
-                for _aid in list(_agent_ws_activity.keys()):
-                    if _aid not in active_run_agents:
-                        _last_act = _agent_ws_activity.get(_aid, 0)
-                        if now - _last_act > 60 * 1000:  # 60秒无 WS 活动
-                            local_correction_agents.add(_aid)
-
+                model_feed = activity_feed.snapshot(now)
+                background, availability = background_work.read(now)
+                reviews = review_waits.snapshot(now)
                 agent_info = {}
-                for aid in ALL_AGENTS:
-                    agent_info[aid] = {'updatedAt': 0, 'model': '-', 'sessionCount': 0, 'subagentCount': 0, 'subagentActiveCount': 0, 'subagentUpdatedAt': 0, 'subagentSessionIds': []}
+                for aid in dict.fromkeys([*ALL_AGENTS, *model_feed['agents'], *background, *reviews]):
+                    agent_info[aid] = {'updatedAt': 0, 'model': '-', 'sessionCount': 0, 'subagentCount': 0, 'subagentUpdatedAt': 0, 'subagentSessionIds': []}
                 for s in d.get('sessions', []):
                     aid = s.get('agentId', 'unknown')
                     if aid not in agent_info:
-                        agent_info[aid] = {'updatedAt': 0, 'model': '-', 'sessionCount': 0, 'subagentCount': 0, 'subagentActiveCount': 0, 'subagentUpdatedAt': 0, 'subagentSessionIds': []}
+                        agent_info[aid] = {'updatedAt': 0, 'model': '-', 'sessionCount': 0, 'subagentCount': 0, 'subagentUpdatedAt': 0, 'subagentSessionIds': []}
                     agent_info[aid]['sessionCount'] += 1
                     key = s.get('key', '')
                     updated = s.get('updatedAt', 0)
                     if ':subagent:' in key:
                         agent_info[aid]['subagentCount'] += 1
-                        # 1012工单（2026-10-12匡书记拍板修）：「N个分身在跑」误显历史会话——新增活跃计数
-                        # 双条件：status非终态 且 最近30分钟内有更新。单status不可靠：昨晚审核链留有
-                        # running僵尸会话（c944cc2b，11h无更新）；单时间窗不可靠：done后短暂窗口内会误数。
-                        if s.get('status') not in ('done', 'killed') and (now - updated) < 1800000:
-                            agent_info[aid]['subagentActiveCount'] += 1
                         _sub_sid = s.get('sessionId', '')
                         if _sub_sid:
                             agent_info[aid]['subagentSessionIds'].append(_sub_sid)
@@ -2573,39 +2312,9 @@ class H(http.server.SimpleHTTPRequestHandler):
                     effective_age = main_age
                     if sub_age is not None and (effective_age is None or sub_age < effective_age):
                         effective_age = sub_age
-                    # 本地矫正（issue-86939）：被标记的 agent 跳过 working 判定，
-                    # 直接落到 age 检测（优先级4/5）
-                    _corrected = aid in local_correction_agents
-                    # 判定优先级：
-                    #   1. hasActiveRun=True（Gateway 精确信号）→ working
-                    #      本地矫正时跳过（active_run_agents 已不含该 agent）
-                    #   2. 有活跃exec进程 → working（强信号）
-                    #   3. WS 30秒内有事件 → working（补充兜底）
-                    #      本地矫正时跳过（防止 Gateway 过时 status 残留）
-                    #   4. updatedAt 90秒内 → working（覆盖模型思考窗口）
-                    #      ⚠️ local_correction 激活时降级为 waiting（issue-0165）
-                    #   5. updatedAt 90秒-10分钟 → waiting
-                    #   6. 超过10分钟 → idle
-                    # hasActiveRun 是最精确的信号，直接来自 Gateway 内部状态
-                    if not _corrected and aid in active_run_agents:
-                        status = 'working'
-                    elif aid in active_agents:
-                        status = 'working'
-                    elif not _corrected and aid in ws_active_agents:
-                        status = 'working'
-                    elif effective_age is None or effective_age > 10 * 60 * 1000:
-                        status = 'idle'
-                    elif effective_age > 90 * 1000:
-                        status = 'waiting'
-                    elif _corrected:
-                        # local_correction 激活时，Gateway 的 updatedAt 不可信（可能被后台刷新），
-                        # 降级为 waiting 而非 working。等真正的新 turn 开始时 hasActiveRun=True 会覆盖。
-                        status = 'waiting'
-                    else:
-                        status = 'working'
-                    # 僵尸session检测（issue-0155）：idle超过30分钟
-                    if status == 'idle' and effective_age is not None and effective_age > 30 * 60 * 1000:
-                        status = 'stale'
+                    card = public_activity(aid, model_feed, background, availability, reviews, now)
+                    if card['status'] == 'idle' and effective_age is not None and effective_age > 30 * 60 * 1000:
+                        card['status'] = 'stale'  # Long idle, still confirmed by current observations.
                     # 从 transcript 读真实模型/provider，优先 direct 主会话，fallback 到 session 配置值
                     _sid = info.get('directSessionId', '') or info.get('sessionId', '')
                     # 从 transcript 读最近 N 条实际模型分布（主会话 + subagent 合并统计）
@@ -2618,7 +2327,7 @@ class H(http.server.SimpleHTTPRequestHandler):
                     agents.append({
                         'agentId': aid,
                         'agentName': AGENT_NAMES.get(aid, aid),
-                        'status': status,
+                        **card,
                         'ageMs': effective_age,
                         'model': _model,
                         'modelProvider': _provider,
@@ -2627,12 +2336,19 @@ class H(http.server.SimpleHTTPRequestHandler):
                         'modelDistStale': _mdist.get('stale', False),  # Y4：数据来自旧 jsonl 回退时标滞后
                         'sessionCount': info['sessionCount'],
                         'subagentCount': info['subagentCount'],
-                        'subagentActiveCount': info['subagentActiveCount'],
                     })
                 agent_order = {aid: i for i, aid in enumerate(ALL_AGENTS)}
                 agents.sort(key=lambda a: agent_order.get(a['agentId'], 99))
-                _active_run_agent_ids = sorted({(_parse_agent_id_from_session_key(sk) or sk) for sk in _agent_active_runs.keys()})
-                body = json.dumps({'agents': agents, 'now': now, 'wsConnected': _ws_connected, 'activeRunAgents': _active_run_agent_ids, 'gatewayHealth': _gateway_health(), 'hermesHealth': _hermes_health()}).encode()
+                bg_ready, bg_stale, bg_checked = availability
+                fresh = bool(model_feed['ready'] and not model_feed['stale'] and bg_ready and not bg_stale)
+                body = json.dumps({
+                    'agents': agents, 'now': now, 'wsConnected': model_feed['connected'],
+                    'statusFresh': fresh and all(not card['activityStale'] for card in agents),
+                    'lastConfirmedAt': min(model_feed['checkedAt'], bg_checked) if model_feed.get('checkedAt') and bg_checked else None,
+                    'activeRunAgents': sorted(aid for aid, row in model_feed['agents'].items()
+                                              if row['state'] == 'working' and not model_feed['stale']),
+                    'gatewayHealth': _gateway_health(), 'hermesHealth': _hermes_health(),
+                }).encode()
             except Exception as e:
                 body = json.dumps({'error': str(e)}).encode()
             self.send_response(200)

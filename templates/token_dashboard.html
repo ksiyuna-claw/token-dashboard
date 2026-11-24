@@ -105,6 +105,9 @@
   .agent-card .ac-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .agent-card .ac-name { font-size: 14px; font-weight: 600; }
   .agent-card .ac-status-icon { font-size: 20px; line-height: 1; }
+  .agent-card .ac-activity { font-size: 12px; line-height: 1.45; margin-bottom: 7px; color: var(--dim); }
+  .agent-card-working .ac-activity { color: var(--green); }
+  .agent-card-waiting .ac-activity { color: var(--yellow); }
   .agent-card .ac-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
   .agent-card .ac-label { color: var(--dim); }
   .agent-card .ac-val { font-weight: 600; font-size: 12px; }
@@ -120,9 +123,9 @@
   /* 压缩模式（模型≥3）：色点 + 首字母，hover 看全名 */
   .agent-card .ac-mchip-mini { display: inline-flex; align-items: center; gap: 3px; padding: 1px 5px 1px 4px; min-width: 0; overflow: hidden; } /* 2026-11-24：标签变长时整行等比收紧，不再把最右侧标签整块挤出可视区 */
   .agent-card .ac-mdot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-  /* 当前（最新调用）模型：循环光扫标识“正在跑” */
+  /* 仅在模型工作已确认时点亮最近调用的模型标签。 */
   .agent-card .ac-mchip-cur { position: relative; overflow: hidden; }
-  .agent-card .ac-mchip-cur::after { content: ''; position: absolute; top: 0; left: -60%; width: 45%; height: 100%; background: linear-gradient(100deg, transparent, rgba(255,255,255,0.5), transparent); animation: mchip-sweep 2.4s ease-in-out infinite; pointer-events: none; }
+  .agent-card[data-model-active="true"] .ac-mchip-cur::after { content: ''; position: absolute; top: 0; left: -60%; width: 45%; height: 100%; background: linear-gradient(100deg, transparent, rgba(255,255,255,0.5), transparent); animation: mchip-sweep 2.4s ease-in-out infinite; pointer-events: none; }
   @keyframes mchip-sweep { 0% { left: -60%; } 55%, 100% { left: 130%; } }
   /* chip 颜色由 JS 按模型固定色注入（MODEL_COLORS / colorForModel），不再分主力/fallback */
   .agent-card .ac-mbar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 5px; background: var(--border); }
@@ -146,7 +149,7 @@
 </div>
 
 <div class="section">
-  <div class="section-title">🦐 虾厂员工 <span id="agentStatusSummary" style="font-size:12px;color:var(--dim);font-weight:normal;margin-left:8px"></span></div>
+  <div class="section-title">🦐 虾厂员工 <span id="agentStatusSummary" aria-live="polite" style="font-size:12px;color:var(--dim);font-weight:normal;margin-left:8px">正在读取</span></div>
   <div class="tab-bar" id="sessionTabs">
     <button class="tab-btn active" data-filter="direct" onclick="switchTab(this)">主会话<span class="tab-badge" id="badge-direct">0</span></button>
     <button class="tab-btn" data-filter="heartbeat" onclick="switchTab(this)">💓心跳<span class="tab-badge" id="badge-heartbeat">0</span></button>
@@ -694,8 +697,34 @@ let _allSessions = [];
 let _windowStaleAge = null;  // Y5(2026-09-11)：服务端回退旧缓存的滞后秒数（null=数据新鲜）
 let _currentFilter = 'direct';
 let _categoryCounts = {};
-let _agentStatusMap = {}; // agentId → status info from /agent-status
-let _agentStatusNow = 0;  // /agent-status 返回的服务端 now（ms），用于模型时间戳相对时间
+let _agentStatusMap = Object.create(null);
+let _statusPhase = 'loading';
+let _statusFresh = false;
+let _lastStatusConfirmed = 0;
+let _lastStatusResponse = 0;
+let _lastStatusReceived = 0;
+let _sessionsUnavailable = false;
+let _statusRequestPending = false;
+const STATUS_INTERVAL_MS = 15000;
+const ACTIVITY_TEXT = {
+  self: '本人执行', subagent: '分身执行', background: '后台程序运行中',
+  remote: '云端任务运行中', review: '等对焦虾审核', submitted: '已提交，等结果', queued: '排队中',
+};
+const STATUS_LABELS = {working:'工作中', waiting:'等待中', idle:'空闲', stale:'沉睡', unknown:'状态待确认'};
+
+function statusClock(at) {
+  if (!Number.isFinite(at) || at <= 0) return '';
+  const date = new Date(at);
+  if (date.toDateString() === new Date().toDateString()) return date.toLocaleTimeString('zh-CN', {hour12:false});
+  return date.toLocaleString('zh-CN', {hour12:false});
+}
+
+function visibleAgentStatus(stat, offline) {
+  if (offline || !stat || stat.activityStale !== false || !Number.isFinite(stat.confirmedAt) ||
+      stat.confirmedAt <= 0 || !Object.hasOwn(STATUS_LABELS, stat.status)) return 'unknown';
+  if ((stat.status === 'working' || stat.status === 'waiting') && !Object.hasOwn(ACTIVITY_TEXT, stat.activityKind)) return 'unknown';
+  return stat.status;
+}
 
 function switchTab(btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -707,7 +736,10 @@ function switchTab(btn) {
 async function fetchSessions() {
   try {
     const r = await fetch('/sessions-json');
+    if (!r.ok) throw new Error('会话获取失败');
     const d = await r.json();
+    if (d.error || !Array.isArray(d.sessions)) throw new Error('会话数据暂不可用');
+    _sessionsUnavailable = false;
     const all = d.sessions || [];
 
     // Y5(2026-09-11)：服务端回退旧缓存时带 _stale/_staleAgeSec，界面显示「数据滞后」角标
@@ -757,7 +789,8 @@ async function fetchSessions() {
 
     renderAgentCards();
   } catch(e) {
-    document.getElementById('agentCardGrid').innerHTML = `<div class="error">获取失败: ${e.message}</div>`;
+    _sessionsUnavailable = true;
+    renderAgentCards();
   }
 }
 
@@ -767,12 +800,12 @@ function renderAgentCards() {
     filtered = _allSessions.filter(s => s._cat.id === _currentFilter);
   }
 
-  document.getElementById('sessionCount').textContent = `${filtered.length} / ${_allSessions.length} session` + (_windowStaleAge != null ? ` · ⏳数据滞后${_windowStaleAge < 90 ? Math.round(_windowStaleAge) + 's' : Math.round(_windowStaleAge / 60) + 'min'}` : '');
+  document.getElementById('sessionCount').textContent = `${filtered.length} / ${_allSessions.length} session` + (_sessionsUnavailable ? ' · 会话资料未更新' : _windowStaleAge != null ? ` · ⏳数据滞后${_windowStaleAge < 90 ? Math.round(_windowStaleAge) + 's' : Math.round(_windowStaleAge / 60) + 'min'}` : '');
 
   let totalIn = 0, totalOut = 0;
 
   // 按 agentId 去重，每个 agent 选最新活跃的 session
-  const agentLatest = {};
+  const agentLatest = Object.create(null);
   for (const s of filtered) {
     const aid = s.agentId || 'unknown';
     if (!agentLatest[aid] || (s.ageMs != null && s.ageMs < (agentLatest[aid].ageMs ?? Infinity))) {
@@ -780,15 +813,16 @@ function renderAgentCards() {
     }
   }
   // 补全没有 session 的 agent
-  for (const aid of AGENT_ORDER) {
+  for (const aid of [...AGENT_ORDER, ...Object.keys(_agentStatusMap)]) {
     if (!agentLatest[aid]) agentLatest[aid] = null;
   }
 
   // 排序：working → waiting → idle，同状态内按最近活跃排
-  const statusOrder = {working: 0, waiting: 1, idle: 2, stale: 3};
+  const offline = _statusPhase !== 'ok' || Date.now() - _lastStatusReceived > 2 * STATUS_INTERVAL_MS;
+  const statusOrder = {working: 0, waiting: 1, unknown: 2, idle: 3, stale: 4};
   const sorted = Object.keys(agentLatest).sort((a, b) => {
-    const sa = _agentStatusMap[a]?.status || 'idle';
-    const sb = _agentStatusMap[b]?.status || 'idle';
+    const sa = visibleAgentStatus(_agentStatusMap[a], offline);
+    const sb = visibleAgentStatus(_agentStatusMap[b], offline);
     const diff = (statusOrder[sa] ?? 9) - (statusOrder[sb] ?? 9);
     if (diff !== 0) return diff;
     const aa = agentLatest[a]?.ageMs ?? Infinity;
@@ -796,31 +830,41 @@ function renderAgentCards() {
     return aa - ab;
   });
 
-  const statusIcon = {working:'<span class="spin-icon">🔨</span>', waiting:'⏳', idle:'😴', stale:'💤'};
-  const statusCls = {working:'agent-card-working', waiting:'agent-card-waiting', idle:'agent-card-idle', stale:'agent-card-idle'};
-  const statusText = {working:'工作中', waiting:'等待中', idle:'空闲', stale:'沉睡'};
+  const statusIcon = {working:'<span class="spin-icon">🔨</span>', waiting:'⏳', idle:'😴', stale:'💤', unknown:'·'};
+  const statusCls = {working:'agent-card-working', waiting:'agent-card-waiting', idle:'agent-card-idle', stale:'agent-card-idle', unknown:'agent-card-unknown'};
 
   let html = '';
-  let workingCount = 0;
+  const counts = {working:0, waiting:0, unknown:0, idle:0, stale:0};
 
   for (const aid of sorted) {
     const s = agentLatest[aid];
     const stat = _agentStatusMap[aid] || {};
-    const st = stat.status || 'idle';
-    if (st === 'working') workingCount++;
+    const st = visibleAgentStatus(stat, offline);
+    counts[st]++;
 
-    const displayName = AGENT_NAMES[aid] || aid;
+    const displayName = mEsc(AGENT_NAMES[aid] || aid);
     const emoji = AGENT_EMOJI[aid] || '🤖';
-    const subCount = stat.subagentCount || 0;
-    const subActive = stat.subagentActiveCount || 0;  // 1012工单：活跃分身数（status非终态且30分钟内有更新），「在跑」文案专用
+    const subActive = st === 'working' && Number.isSafeInteger(stat.subagentActiveCount) ? stat.subagentActiveCount : 0;
+    const modelActive = st === 'working' && ['self','subagent'].includes(stat.activityKind);
+    const lastConfirmed = statusClock(stat.confirmedAt);
+    let activity = STATUS_LABELS[st];
+    if (_statusPhase === 'loading') activity = '正在读取';
+    else if (st === 'unknown' && lastConfirmed) activity += ' · 上次确认 ' + lastConfirmed;
+    else if ((st === 'working' || st === 'waiting') && Object.hasOwn(ACTIVITY_TEXT, stat.activityKind)) {
+      const via = stat.viaSubagent && ['background', 'remote'].includes(stat.activityKind) ? '分身的' : '';
+      activity += ' · ' + via + ACTIVITY_TEXT[stat.activityKind];
+    }
+    const cardAttrs = `data-agent="${mEsc(aid)}" data-model-active="${modelActive}"`;
+    const activityLine = `<div class="ac-activity">${activity}</div>`;
     const age = stat.ageMs ? (stat.ageMs < 60000 ? Math.floor(stat.ageMs/1000)+'秒前' : stat.ageMs < 3600000 ? Math.floor(stat.ageMs/60000)+'分前' : Math.floor(stat.ageMs/3600000)+'时前') : '-';
 
     if (!s) {
       // 无活跃 session
-      html += `<div class="agent-card ${statusCls[st]||''}">
+      html += `<div class="agent-card ${statusCls[st]}" ${cardAttrs}>
         <div class="ac-header"><span class="ac-name">${emoji} ${displayName}</span><span class="ac-status-icon">${statusIcon[st]||'❓'}</span></div>
+        ${activityLine}
         ${renderModelArea(stat) || `<div class="ac-row"><span class="ac-label">模型</span><span class="ac-val" style="color:var(--dim)">—</span></div>`}
-        <div class="ac-row"><span class="ac-label">活跃</span><span class="ac-val" style="color:var(--dim)">无活跃会话</span></div>
+        <div class="ac-row"><span class="ac-label">会话</span><span class="ac-val" style="color:var(--dim)">${_sessionsUnavailable ? '未更新' : '此分类暂无记录'}</span></div>
         <div class="ac-row"><span class="ac-label">上下文</span><span class="ac-val" style="color:var(--dim)">—</span></div>
         <div class="ac-ctx-bar"><div class="ac-ctx-fill" style="width:0%;background:var(--border)"></div></div>
         ${subActive > 0 ? `<div class="ac-sub" style="color:var(--purple)">📎 ${subActive}个分身在跑</div>` : ''}
@@ -836,8 +880,9 @@ function renderAgentCards() {
       kindBadge = `<span class="kind-badge ${s._cat.badgeCls}">${s._cat.label}</span>`;
     }
 
-    html += `<div class="agent-card ${statusCls[st]||''}">
+    html += `<div class="agent-card ${statusCls[st]}" ${cardAttrs}>
       <div class="ac-header"><span class="ac-name">${emoji} ${displayName} ${kindBadge}</span><span class="ac-status-icon">${statusIcon[st]||'❓'} <span style="font-size:10px;color:var(--dim)">${age}</span></span></div>
+      ${activityLine}
       ${renderModelArea(stat) || `<div class="ac-row"><span class="ac-label">模型</span><span class="ac-val">${mEsc(s.model||'-')} ${ptag}</span></div>`}
       <div class="ac-row"><span class="ac-label">输入/输出</span><span class="ac-val">↓${fmt(s.inputTokens||0)} ↑${fmt(s.outputTokens||0)}</span></div>
       <div class="ac-row"><span class="ac-label">上下文</span><span class="ac-val">${cp}%</span></div>
@@ -848,7 +893,20 @@ function renderAgentCards() {
     totalOut += s.outputTokens || 0;
   }
   document.getElementById('agentCardGrid').innerHTML = html;
-  document.getElementById('agentStatusSummary').textContent = workingCount > 0 ? `🔧 ${workingCount}只虾在工作` : '全部空闲';
+  const summary = [];
+  if (counts.working) summary.push(`${counts.working}只虾在工作`);
+  if (counts.waiting) summary.push(`${counts.waiting}只在等待`);
+  if (counts.unknown) summary.push(`${counts.unknown}只状态待确认`);
+  const fresh = !offline && _statusFresh;
+  const summaryText = summary.join(' · ') || (fresh ? '全部空闲' : '状态待确认');
+  document.getElementById('agentStatusSummary').textContent = _statusPhase === 'loading' ? '正在读取' : summaryText;
+  const updated = document.getElementById('statusUpdate');
+  const clock = statusClock(_lastStatusConfirmed);
+  const stamp = clock ? ' · 上次确认 ' + clock : '';
+  if (_statusPhase === 'loading') updated.textContent = '正在读取员工状态';
+  else if (!fresh || counts.unknown) updated.textContent = '员工状态待确认' + stamp;
+  else updated.textContent = clock ? '员工状态更新于 ' + clock : '员工状态已更新';
+  updated.style.color = fresh && !counts.unknown ? 'var(--green)' : 'var(--dim)';
 
   // 总览
   document.getElementById('summaryGrid').innerHTML = [
@@ -1132,15 +1190,37 @@ async function fetchCron() {
 }
 
 async function fetchAgentStatus() {
+  if (_statusRequestPending) return;
+  _statusRequestPending = true;
+  if (_lastStatusReceived && Date.now() - _lastStatusReceived > 2 * STATUS_INTERVAL_MS) renderAgentCards();
   try {
-    const r = await fetch('/agent-status');
+    const r = await fetch('/agent-status', {cache:'no-store', signal:AbortSignal.timeout(20000)});
+    if (!r.ok) throw new Error('员工状态请求失败');
     const d = await r.json();
-    if (d.error) { console.error('fetchAgentStatus:', d.error); return; }
-    _agentStatusMap = {};
-    _agentStatusNow = d.now || Date.now();
-    for (const a of d.agents) {
-      _agentStatusMap[a.agentId] = a;
+    if (d.error || !Array.isArray(d.agents) || !Number.isFinite(d.now) || typeof d.statusFresh !== 'boolean') {
+      throw new Error('员工状态资料不完整');
     }
+    // 延迟或缓存的旧回复不能覆盖较新的状态，也不能延长资料的有效期。
+    if (d.now <= _lastStatusResponse) return;
+    const serverTime = Date.parse(r.headers.get('date')) || Date.now();
+    if (d.now > serverTime + 2 * STATUS_INTERVAL_MS) throw new Error('员工状态时间无效');
+    const responseAge = Math.max(serverTime - d.now, Number(r.headers.get('age')) * 1000 || 0);
+    const agents = Object.create(null);
+    for (const a of d.agents) {
+      if (a && typeof a.agentId === 'string' && a.agentId) agents[a.agentId] = a;
+    }
+    for (const aid of AGENT_ORDER) {
+      const previous = _agentStatusMap[aid];
+      if (!(agents[aid]?.confirmedAt > 0) && Number.isFinite(previous?.confirmedAt)) {
+        agents[aid] = {...agents[aid], status:'unknown', activityStale:true, confirmedAt:previous.confirmedAt};
+      }
+    }
+    _agentStatusMap = agents;
+    _statusPhase = responseAge > 2 * STATUS_INTERVAL_MS ? 'unavailable' : 'ok';
+    _statusFresh = d.statusFresh;
+    _lastStatusResponse = d.now;
+    _lastStatusReceived = Date.now();
+    if (Number.isFinite(d.lastConfirmedAt) && d.lastConfirmedAt > 0) _lastStatusConfirmed = d.lastConfirmedAt;
     renderAgentCards();
     // 渲染 Gateway 健康卡片
     const gh = d.gatewayHealth;
@@ -1184,10 +1264,13 @@ async function fetchAgentStatus() {
         hm.note ? `<span style="color:var(--yellow)">${hm.note}</span>` : '',
       ].filter(Boolean).join('');
     }
-    // 更新状态刷新时间戳，让用户看到页面在实时刷新
-    const el = document.getElementById('statusUpdate');
-    if (el) el.textContent = '状态更新于 ' + new Date().toLocaleTimeString('zh-CN');
-  } catch(e) { console.error('fetchAgentStatus:', e); }
+  } catch(e) {
+    _statusPhase = 'unavailable';
+    renderAgentCards();
+    console.error('fetchAgentStatus:', e);
+  } finally {
+    _statusRequestPending = false;
+  }
 }
 
 // ===== 邮箱监控模块 =====
@@ -1308,7 +1391,10 @@ async function fetchSystemTasks() {
 }
 
 fetchAgentStatus();
-setInterval(fetchAgentStatus, 15000);
+setInterval(fetchAgentStatus, STATUS_INTERVAL_MS);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) fetchAgentStatus();
+});
 fetchSystemTasks();
 setInterval(fetchSystemTasks, 15000);
 
