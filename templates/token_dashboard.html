@@ -18,6 +18,12 @@
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
   .card .provider-name { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
   .card .provider-sub { font-size: 11px; color: var(--dim); margin-bottom: 12px; }
+  .card-head-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .card-head-row .provider-name { margin-bottom: 0; }
+  .card-refresh-btn { background: transparent; border: 1px solid var(--border); color: var(--dim); padding: 2px 8px; border-radius: 5px; font-size: 11px; cursor: pointer; line-height: 1.5; white-space: nowrap; transition: all 0.2s; }
+  .card-refresh-btn:hover:not(:disabled) { border-color: var(--blue); color: var(--text); }
+  .card-refresh-btn:disabled { opacity: 0.6; cursor: wait; }
+  .card-refresh-hint { font-size: 11px; margin-top: 6px; color: var(--dim); }
   /* 2026-08-07 海外智谱Coding Plan到期下线，代码保留备用 */
   /* 海外智谱额度卡：蓝色左边框 + 蓝标题 + 🌐，与国内区分 */
   /* .card-overseas { border-left: 3px solid var(--blue); } */
@@ -461,6 +467,8 @@ function renderModelArea(stat) {
 function renderQuotaCard(name, subtitle, limits, opts) {
   const badgeHtml = (opts && typeof opts === 'object' && opts.badgeHtml) ? String(opts.badgeHtml) : '';
   const footerHtml = (opts && typeof opts === 'object' && opts.footerHtml) ? String(opts.footerHtml) : '';
+  const actionHtml = (opts && typeof opts === 'object' && opts.actionHtml) ? String(opts.actionHtml) : '';
+  const cardAttrs = (opts && typeof opts === 'object' && opts.cardAttrs) ? (' ' + String(opts.cardAttrs)) : '';
   let rows = '';
   for (const l of (limits || [])) {
     if (l.type === 'TIME_LIMIT') continue;
@@ -478,11 +486,155 @@ function renderQuotaCard(name, subtitle, limits, opts) {
       </div>`;
     }
   }
-  return (rows || footerHtml) ? `<div class="card"><div class="provider-name">${mEsc(name)}</div><div class="provider-sub">${mEsc(subtitle)}${badgeHtml}</div>${rows}${footerHtml}</div>` : '';
+  const headHtml = actionHtml
+    ? `<div class="card-head-row"><div class="provider-name">${mEsc(name)}</div>${actionHtml}</div>`
+    : `<div class="provider-name">${mEsc(name)}</div>`;
+  return (rows || footerHtml) ? `<div class="card"${cardAttrs}>${headHtml}<div class="provider-sub">${mEsc(subtitle)}${badgeHtml}</div>${rows}${footerHtml}</div>` : '';
 }
 
-function renderNoQuota(name, subtitle, note) {
-  return `<div class="card"><div class="provider-name">${mEsc(name)}</div><div class="provider-sub">${mEsc(subtitle)}</div><div class="no-quota">${mEsc(note)}</div></div>`;
+function renderNoQuota(name, subtitle, note, opts) {
+  const actionHtml = (opts && typeof opts === 'object' && opts.actionHtml) ? String(opts.actionHtml) : '';
+  const cardAttrs = (opts && typeof opts === 'object' && opts.cardAttrs) ? (' ' + String(opts.cardAttrs)) : '';
+  const footerHtml = (opts && typeof opts === 'object' && opts.footerHtml) ? String(opts.footerHtml) : '';
+  const headHtml = actionHtml
+    ? `<div class="card-head-row"><div class="provider-name">${mEsc(name)}</div>${actionHtml}</div>`
+    : `<div class="provider-name">${mEsc(name)}</div>`;
+  return `<div class="card"${cardAttrs}>${headHtml}<div class="provider-sub">${mEsc(subtitle)}</div><div class="no-quota">${mEsc(note)}</div>${footerHtml}</div>`;
+}
+
+let _antigravityProvider = { id: 'antigravity', label: 'Antigravity（Google AI 订阅）', baseUrl: 'https://antigravity.google', quotaType: 'antigravity_quota' };
+let _antigravityUpdatedAt = null;
+let _antigravityRefreshing = false;
+
+function renderAntigravityCard(p, j, feedback) {
+  const label = (p && p.label) || 'Antigravity（Google AI 订阅）';
+  const host = (p && p.baseUrl && (p.baseUrl.split('//')[1] || '').split('/')[0]) || 'antigravity.google';
+  const actionHtml = '<button type="button" class="card-refresh-btn" id="btnRefreshAntigravity" onclick="refreshAntigravityQuota()" title="立即重读本地 Antigravity 配额快照（不等待 5 分钟轮询；需终端 agy 写入最新快照）">🔄 刷新</button>';
+  const cardAttrs = 'data-provider-card="antigravity"';
+  const feedbackHtml = (feedback && feedback.text)
+    ? `<div class="card-refresh-hint" style="color:${mEsc(feedback.color || 'var(--dim)')}">${mEsc(feedback.text)}</div>`
+    : '';
+
+  if (!j || j.error) {
+    return renderNoQuota(label, host, '获取失败: ' + ((j && j.error) || '返回为空'), { actionHtml, cardAttrs, footerHtml: feedbackHtml });
+  }
+  if (j.available === false) {
+    return renderNoQuota(label, 'Google AI 订阅 · 本地快照', j.hint || '暂无快照 · 在终端打开一次 agy 自动同步', { actionHtml, cardAttrs, footerHtml: feedbackHtml });
+  }
+  if (j.available !== true) {
+    return renderNoQuota(label, host, 'API返回异常', { actionHtml, cardAttrs, footerHtml: feedbackHtml });
+  }
+
+  const sub = 'Google AI 订阅' + (j.planTier ? ' · ' + j.planTier : '');
+  const rawBuckets = Array.isArray(j.buckets) ? j.buckets : [];
+  const validBuckets = [];
+  let hasDisabled = false;
+  for (const b of rawBuckets) {
+    if (!b || typeof b.usedPercent !== 'number' || !isFinite(b.usedPercent) || b.usedPercent < 0) continue;
+    if (b.disabled === true) hasDisabled = true;
+    validBuckets.push(b);
+  }
+  const is3pBucket = b => String(b.id || '').toLowerCase().startsWith('3p');
+  const non3pBuckets = validBuckets.filter(b => !is3pBucket(b));
+  const tpBuckets = validBuckets.filter(is3pBucket);
+  const fold3p = non3pBuckets.length > 0 && tpBuckets.length > 0 && tpBuckets.every(b => b.usedPercent === 0 && b.disabled !== true);
+  const displayBuckets = fold3p ? non3pBuckets : validBuckets;
+  const limits = displayBuckets.map(b => ({
+    type: 'TOKENS_LIMIT',
+    label: b.label || b.id || '配额',
+    unit: Number.isFinite(b.unit) ? b.unit : 0,
+    percentage: b.usedPercent,
+    nextResetTime: Number.isFinite(b.resetAtMs) ? b.resetAtMs : null
+  }));
+  const ageSec = Number.isFinite(j.ageSec) ? Math.max(0, j.ageSec)
+    : (Number.isFinite(j.updatedAt) ? Math.max(0, Math.floor((Date.now() - j.updatedAt) / 1000)) : null);
+  let badgeHtml = '';
+  if (ageSec != null) {
+    if (ageSec < 60) {
+      badgeHtml = ' <span class="tag tag-green">快照 · 刚刚</span>';
+    } else if (ageSec < 3600) {
+      badgeHtml = ' <span class="tag tag-blue">快照 · ' + Math.floor(ageSec / 60) + '分钟前</span>';
+    } else if (ageSec < 86400) {
+      badgeHtml = ' <span class="tag tag-yellow">快照 · ' + Math.floor(ageSec / 3600) + '小时前</span>';
+    } else {
+      badgeHtml = ' <span class="tag tag-yellow" title="在终端运行一次 agy 即可自动刷新快照">快照 · ' + Math.floor(ageSec / 86400) + '天前（开 agy 刷新）</span>';
+    }
+  }
+  if (hasDisabled) {
+    badgeHtml += ' <span class="tag tag-red">额度受限</span>';
+  }
+  let footerHtml = '';
+  if (fold3p) {
+    const tpTitle = tpBuckets.map(b => (b.label || b.id) + ': ' + b.usedPercent + '% 已用').join(' · ');
+    footerHtml += '<div class="quota-row" title="' + mEsc(tpTitle) + '"><div class="label">Claude/GPT（5h / 周）</div><div style="font-size:12px;color:var(--green)">0% 已用 · 已恢复</div></div>';
+  }
+  for (const cr of (Array.isArray(j.credits) ? j.credits : [])) {
+    if (cr && typeof cr.remainingAmount === 'number' && isFinite(cr.remainingAmount) && cr.remainingAmount >= 0) {
+      const amtText = Number.isInteger(cr.remainingAmount) ? String(cr.remainingAmount) : cr.remainingAmount.toFixed(2);
+      footerHtml += '<div class="quota-row"><div><div class="label">' + mEsc(cr.label || 'AI Credits') + '</div></div><div class="value" style="color:var(--blue)">' + mEsc(amtText) + '</div></div>';
+    }
+  }
+  footerHtml += feedbackHtml;
+  if (!limits.length && !footerHtml) {
+    return renderNoQuota(label, sub, '快照无有效配额数据', { actionHtml, cardAttrs, footerHtml: feedbackHtml });
+  }
+  return renderQuotaCard(label, sub, limits, { badgeHtml, footerHtml, actionHtml, cardAttrs });
+}
+
+async function refreshAntigravityQuota() {
+  if (_antigravityRefreshing) return;
+  _antigravityRefreshing = true;
+  const btn = document.getElementById('btnRefreshAntigravity');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '刷新中...';
+  }
+  const prevUpdatedAt = _antigravityUpdatedAt;
+  try {
+    const r = await fetch('/quota/antigravity?t=' + Date.now(), { cache: 'no-store' });
+    if (r.redirected || /\/login(\?|$)/.test(r.url)) throw new Error('登录已过期，请刷新页面重新登录');
+    if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    let feedback;
+    if (j && j.error) {
+      feedback = { text: '刷新失败: ' + j.error, color: 'var(--red)' };
+    } else if (j && j.available === true) {
+      _antigravityUpdatedAt = Number.isFinite(j.updatedAt) ? j.updatedAt : null;
+      if (prevUpdatedAt != null && j.updatedAt === prevUpdatedAt) {
+        feedback = { text: '快照未变化（需在终端运行一次 agy 同步最新余量）', color: 'var(--yellow)' };
+      } else {
+        feedback = { text: '✅ 已读取最新快照', color: 'var(--green)' };
+      }
+    } else if (j && j.available === false) {
+      _antigravityUpdatedAt = null;
+      feedback = { text: '仍暂无快照（在终端打开一次 agy 自动生成）', color: 'var(--dim)' };
+    } else {
+      feedback = { text: '快照返回格式异常', color: 'var(--yellow)' };
+    }
+    const cardEl = document.querySelector('[data-provider-card="antigravity"]');
+    if (cardEl) {
+      cardEl.outerHTML = renderAntigravityCard(_antigravityProvider, j, feedback);
+    }
+  } catch (e) {
+    const cardEl = document.querySelector('[data-provider-card="antigravity"]');
+    if (cardEl) {
+      let hintEl = cardEl.querySelector('.card-refresh-hint');
+      if (!hintEl) {
+        hintEl = document.createElement('div');
+        hintEl.className = 'card-refresh-hint';
+        cardEl.appendChild(hintEl);
+      }
+      hintEl.style.color = 'var(--red)';
+      hintEl.textContent = '刷新失败: ' + (e && e.message ? e.message : '网络异常');
+    }
+    const curBtn = document.getElementById('btnRefreshAntigravity');
+    if (curBtn) {
+      curBtn.disabled = false;
+      curBtn.textContent = '🔄 刷新';
+    }
+  } finally {
+    _antigravityRefreshing = false;
+  }
 }
 
 let _quotaRetryTimer = null;  // P0(2026-10-22): 额度板块失败后的30秒快速重试定时器
@@ -697,68 +849,13 @@ async function fetchProviderQuotas() {
           cards.push(renderNoQuota(p.label, host, 'API返回异常'));
         }
       } else if (p.quotaType === 'antigravity_quota') {
-        if (j.error) {
-          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
-        } else if (j.available === false) {
-          cards.push(renderNoQuota(p.label, 'Google AI 订阅 · 本地快照', j.hint || '暂无快照 · 在终端打开一次 agy 自动同步'));
-        } else if (j.available === true) {
-          const sub = 'Google AI 订阅' + (j.planTier ? ' · ' + j.planTier : '');
-          const rawBuckets = Array.isArray(j.buckets) ? j.buckets : [];
-          const validBuckets = [];
-          let hasDisabled = false;
-          for (const b of rawBuckets) {
-            if (!b || typeof b.usedPercent !== 'number' || !isFinite(b.usedPercent) || b.usedPercent < 0) continue;
-            if (b.disabled === true) hasDisabled = true;
-            validBuckets.push(b);
-          }
-          const is3pBucket = b => String(b.id || '').toLowerCase().startsWith('3p');
-          const non3pBuckets = validBuckets.filter(b => !is3pBucket(b));
-          const tpBuckets = validBuckets.filter(is3pBucket);
-          const fold3p = non3pBuckets.length > 0 && tpBuckets.length > 0 && tpBuckets.every(b => b.usedPercent === 0 && b.disabled !== true);
-          const displayBuckets = fold3p ? non3pBuckets : validBuckets;
-          const limits = displayBuckets.map(b => ({
-            type: 'TOKENS_LIMIT',
-            label: b.label || b.id || '配额',
-            unit: Number.isFinite(b.unit) ? b.unit : 0,
-            percentage: b.usedPercent,
-            nextResetTime: Number.isFinite(b.resetAtMs) ? b.resetAtMs : null
-          }));
-          const ageSec = Number.isFinite(j.ageSec) ? Math.max(0, j.ageSec)
-            : (Number.isFinite(j.updatedAt) ? Math.max(0, Math.floor((Date.now() - j.updatedAt) / 1000)) : null);
-          let badgeHtml = '';
-          if (ageSec != null) {
-            if (ageSec < 60) {
-              badgeHtml = ' <span class="tag tag-green">快照 · 刚刚</span>';
-            } else if (ageSec < 3600) {
-              badgeHtml = ' <span class="tag tag-blue">快照 · ' + Math.floor(ageSec / 60) + '分钟前</span>';
-            } else if (ageSec < 86400) {
-              badgeHtml = ' <span class="tag tag-yellow">快照 · ' + Math.floor(ageSec / 3600) + '小时前</span>';
-            } else {
-              badgeHtml = ' <span class="tag tag-yellow" title="在终端运行一次 agy 即可自动刷新快照">快照 · ' + Math.floor(ageSec / 86400) + '天前（开 agy 刷新）</span>';
-            }
-          }
-          if (hasDisabled) {
-            badgeHtml += ' <span class="tag tag-red">额度受限</span>';
-          }
-          let footerHtml = '';
-          if (fold3p) {
-            const tpTitle = tpBuckets.map(b => (b.label || b.id) + ': ' + b.usedPercent + '% 已用').join(' · ');
-            footerHtml += '<div class="quota-row" title="' + mEsc(tpTitle) + '"><div class="label">Claude/GPT（5h / 周）</div><div style="font-size:12px;color:var(--green)">0% 已用 · 已恢复</div></div>';
-          }
-          for (const cr of (Array.isArray(j.credits) ? j.credits : [])) {
-            if (cr && typeof cr.remainingAmount === 'number' && isFinite(cr.remainingAmount) && cr.remainingAmount >= 0) {
-              const amtText = Number.isInteger(cr.remainingAmount) ? String(cr.remainingAmount) : cr.remainingAmount.toFixed(2);
-              footerHtml += '<div class="quota-row"><div><div class="label">' + mEsc(cr.label || 'AI Credits') + '</div></div><div class="value" style="color:var(--blue)">' + mEsc(amtText) + '</div></div>';
-            }
-          }
-          if (!limits.length && !footerHtml) {
-            cards.push(renderNoQuota(p.label, sub, '快照无有效配额数据'));
-          } else {
-            cards.push(renderQuotaCard(p.label, sub, limits, { badgeHtml, footerHtml }));
-          }
-        } else {
-          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+        _antigravityProvider = p;
+        if (j && j.available === true && Number.isFinite(j.updatedAt)) {
+          _antigravityUpdatedAt = j.updatedAt;
+        } else if (j && j.available === false) {
+          _antigravityUpdatedAt = null;
         }
+        cards.push(renderAntigravityCard(p, j));
       }
     }
     if (quotaAnyFailed) scheduleQuotaRetry();  // Y1: 单provider失败也30s快速重试

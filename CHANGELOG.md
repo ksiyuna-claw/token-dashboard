@@ -2,6 +2,11 @@
 
 ## 2026-11-25
 
+- **Antigravity 卡片新增合规「🔄 刷新」按钮 + 同步基围虾 `MEMORY.md`（水母 🪼）**：
+  1. **前端手动刷新**：`templates/token_dashboard.html` 为 `renderQuotaCard()` / `renderNoQuota()` 新增可选右上角操作区，并在 Antigravity 卡片右上角增加 `🔄 刷新` 按钮（`refreshAntigravityQuota()`）。点击后立即绕过浏览器缓存请求 `/quota/antigravity?t=<ts>` 重读本地脱敏快照 `data/antigravity_quota.json` 并局部替换卡片 DOM；若快照时间戳已更新显示「✅ 已读取最新快照」，未变化则诚实提示「快照未变化（需在终端运行一次 agy 同步最新余量）」。**全程零调用 `agy`、零碰 Google OAuth 与内部端口**。
+  2. **OpenClaw 侧残余记忆同步**：将 `/Users/kuangsiyu/.openclaw/workspace-jiweixia/MEMORY.md` 中过期的看板路径与交接前状态备注全部更新为 `/Volumes/ZHITAI/codex_project/token-dashboard/`。
+  3. **验证**：`node --check` 通过；`unittest` **45/45** 通过（含扩展的 `test_quota_page.py` 刷新状态与 XSS 断言）；重启后内置浏览器实测点击「🔄 刷新」触发 HTTP 200 并干净显示提示语，0 报错。
+
 - **新增「📂 活跃项目进度」只读扫盘板块（水母 🪼，第二阶段交付）**：
   1. **只读扫盘模块 `dashboard_projects.py`**：扫描 `/Volumes/ZHITAI/codex_project/*` 与 `~/.openclaw/workspace/ai_workspace/projects/*` 一级子目录下的 `项目状态.md`（支持 `config.json` 的 `project_scan_roots` 覆盖），兼容《共同记忆与收工落盘规范.md》标准 6 项头部与现有旧式纪要回退解析（倒序/正序/初始化标题与顶部更新段），并统计 `/Volumes/ZHITAI/codex_project/虾厂共同记忆/待审规则建议.md` 待审条数（过滤示例行）；严格排除 `workspace-xiaohexia`、隐藏目录及归档/临时目录。
   2. **服务端与前端**：`token_dashboard_server.py` 新增 `@cached(30)` 的 `/projects-status` 只读端点；`templates/token_dashboard.html` 在「模型供应商额度」之后新增「📂 活跃项目进度」双列网格区块，支持「全部 / 进行中 / 待拍板 / 纪要式 / 暂停·完结」筛选、默认 6 张折叠展开切换（跨 2 分钟轮询保持状态）及全字段 `mEsc()` 转义。

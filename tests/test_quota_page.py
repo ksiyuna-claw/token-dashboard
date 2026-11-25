@@ -103,6 +103,7 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Antigravity（Google AI 订阅）', cards_text)
             self.assertIn('暂无快照', cards_text)
             self.assertLess(cards_text.index('Codex'), cards_text.index('Antigravity'))
+            self.assertTrue(await page.locator('#btnRefreshAntigravity').is_visible())
 
             # Verify linxia resolves to 磷虾 and XSS did not execute
             await page.wait_for_function("document.querySelectorAll('#cronOpenclawBody tr').length >= 1")
@@ -112,10 +113,11 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await page.evaluate('window.__xss'))
 
             # Switch Antigravity mock to full snapshot with buckets + credits + freshness tag
+            snap_ts = int(time.time() * 1000) - 180_000
             quotas['antigravity'] = {
                 'available': True,
                 'planTier': 'Pro<img src=x onerror="window.__xss=3">',
-                'updatedAt': int(time.time() * 1000) - 180_000,
+                'updatedAt': snap_ts,
                 'ageSec': 180,
                 'buckets': [
                     {
@@ -167,6 +169,19 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('Claude/GPT 5小时窗口', updated_text)
             self.assertIn('AI Credits 余额', updated_text)
             self.assertIn('42', updated_text)
+
+            # Clicking refresh button when updatedAt is unchanged shows honest unchanged hint
+            await page.locator('#btnRefreshAntigravity').click()
+            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('快照未变化')")
+
+            # Updating snapshot timestamp + percentage and clicking refresh updates card in-place
+            quotas['antigravity']['updatedAt'] = snap_ts + 120_000
+            quotas['antigravity']['ageSec'] = 5
+            quotas['antigravity']['buckets'][0]['usedPercent'] = 33.3
+            await page.locator('#btnRefreshAntigravity').click()
+            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('已读取最新快照')")
+            refreshed_text = await page.locator('#providerGrid').inner_text()
+            self.assertIn('33.3% 已用', refreshed_text)
 
             # Once 3p has active consumption (>0%), expand to full progress row
             quotas['antigravity']['buckets'][2]['usedPercent'] = 15.0
