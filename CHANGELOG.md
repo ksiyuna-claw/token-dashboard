@@ -2,6 +2,11 @@
 
 ## 2026-11-25
 
+- **活跃项目独立页卡切换 + Antigravity 实时刷新余量（水母 🪼）**：
+  1. **顶层双页卡切换**：`templates/token_dashboard.html` 顶部新增 `📊 运营监控` / `📂 活跃项目` 切换页卡（支持 `#monitor` / `#projects` URL Hash）；将「📂 活跃项目进度」迁入独立页卡全量展示，主监控页恢复紧凑；活跃项目页卡右上角增加 `🔄 刷新扫盘`（调用 `/projects-status?refresh=1` 绕过 30s 缓存即时扫盘）。
+  2. **Antigravity 实时刷新快照**：`dashboard_quota.py` 新增 `refresh_antigravity_snapshot()`（单飞锁 + 15s 冷却 + 15s 超时保护），通过官方只读零对话子命令 `agy models` 触发 `statusLine` 钩子即时写入最新余量至 `data/antigravity_quota.json`；`token_dashboard_server.py` 新增需鉴权的 `POST /quota/antigravity/refresh`；前端 `🔄 刷新` 按钮点击后实时同步并更新余量与新鲜度标签。顺手修复 `renderQuotaCard()` 倒计时已过期窗口偶现 `已恢复 恢复` 重复字样。
+  3. **验证**：`py_compile` + `node --check` 通过；`unittest` **47/47** 全部通过（含新增后端刷新/冷却/鉴权单测及 Playwright 双页卡与刷新测试）；重启后内置浏览器实测 `POST /quota/antigravity/refresh` 返回 `HTTP 200`（`ageSec: 0`、实时余量 `33.7%`→`34.4%` 并提示「✅ 已实时同步最新余量」），`📂 活跃项目` 页卡全量 10 卡无重叠、筛选与即时扫盘正常、0 控制台/网络报错。
+
 - **Antigravity 卡片新增合规「🔄 刷新」按钮 + 同步基围虾 `MEMORY.md`（水母 🪼）**：
   1. **前端手动刷新**：`templates/token_dashboard.html` 为 `renderQuotaCard()` / `renderNoQuota()` 新增可选右上角操作区，并在 Antigravity 卡片右上角增加 `🔄 刷新` 按钮（`refreshAntigravityQuota()`）。点击后立即绕过浏览器缓存请求 `/quota/antigravity?t=<ts>` 重读本地脱敏快照 `data/antigravity_quota.json` 并局部替换卡片 DOM；若快照时间戳已更新显示「✅ 已读取最新快照」，未变化则诚实提示「快照未变化（需在终端运行一次 agy 同步最新余量）」。**全程零调用 `agy`、零碰 Google OAuth 与内部端口**。
   2. **OpenClaw 侧残余记忆同步**：将 `/Users/kuangsiyu/.openclaw/workspace-jiweixia/MEMORY.md` 中过期的看板路径与交接前状态备注全部更新为 `/Volumes/ZHITAI/codex_project/token-dashboard/`。

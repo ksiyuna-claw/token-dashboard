@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """虾厂 Token 看板 HTTP 服务"""
 import http.server, json, subprocess, os, time, urllib.request, urllib.error, threading, uuid, logging, logging.handlers, gc, resource, functools, plistlib, hmac, hashlib, base64, sqlite3, shutil  # B7(2026-09-11): sqlite3提模块级，原函数内重复import在循环调用下纯浪费；shutil(2026-11-11): 磁盘口径修正用
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 # ── Auth 配置（JWT 无状态认证）─────────
 _AUTH_ENV_PATH = os.path.join(os.path.expanduser('~'), '.openclaw/workspace/ai_workspace/projects/2026-06-04-量化信息看板/.env')
@@ -52,6 +52,7 @@ from dashboard_quota import (
     codex_valid_pct as _codex_valid_pct,
     get_providers as _dq_get_providers,
     fetch_quota as _dq_fetch_quota,
+    refresh_antigravity_snapshot as _dq_refresh_antigravity,
 )
 from dashboard_projects import scan_active_projects as _scan_active_projects
 
@@ -1766,6 +1767,12 @@ class H(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
             return
+        if req_path == '/quota/antigravity/refresh':
+            if not self._require_auth():
+                return
+            status, data = _dq_refresh_antigravity(_ANTIGRAVITY_SNAPSHOT_PATH)
+            self._send_json(status, data)
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -1935,7 +1942,11 @@ class H(http.server.SimpleHTTPRequestHandler):
         elif req_path == '/projects-status':
             """活跃项目 项目状态.md 只读扫盘"""
             try:
-                data = _get_projects_status()
+                qs = parse_qs(urlsplit(self.path).query)
+                if '1' in qs.get('refresh', []):
+                    data = _scan_active_projects(project_dir=_PROJECT_DIR)
+                else:
+                    data = _get_projects_status()
             except Exception as e:
                 data = {'error': str(e)}
             self._send_json(200, data)

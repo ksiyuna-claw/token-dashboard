@@ -3,6 +3,8 @@ import datetime
 import json
 import math
 import os
+import shutil
+import subprocess
 import threading
 import time
 import urllib.error
@@ -10,6 +12,8 @@ import urllib.request
 from urllib.parse import quote
 
 QUOTA_CACHE_TTL = 60
+ANTIGRAVITY_REFRESH_COOLDOWN = 15
+ANTIGRAVITY_REFRESH_TIMEOUT = 15
 
 _PROXY_HANDLER = urllib.request.ProxyHandler({
     'http': 'http://127.0.0.1:7890',
@@ -38,6 +42,8 @@ HIDDEN_PROVIDERS = {'zai'}
 
 _quota_cache = {}
 _quota_cache_lock = threading.Lock()
+_ag_refresh_lock = threading.Lock()
+_ag_last_refresh_ts = 0.0
 
 
 def is_finite_number(value):
@@ -368,6 +374,76 @@ def fetch_antigravity(snapshot_path, now_ms=None):
         'credits': credits,
         'source': source,
     }
+
+
+def refresh_antigravity_snapshot(
+    snapshot_path,
+    agy_bin=None,
+    cooldown_sec=ANTIGRAVITY_REFRESH_COOLDOWN,
+    timeout_sec=ANTIGRAVITY_REFRESH_TIMEOUT,
+    now_fn=time.time,
+    runner=subprocess.run,
+):
+    """Trigger official zero-LLM `agy models` so statusLine refreshes local quota snapshot."""
+    global _ag_last_refresh_ts
+    bin_path = agy_bin or shutil.which('agy') or os.path.expanduser('~/.local/bin/agy')
+
+    with _ag_refresh_lock:
+        now = now_fn()
+        if cooldown_sec > 0 and _ag_last_refresh_ts > 0 and (now - _ag_last_refresh_ts) < cooldown_sec:
+            status, payload = fetch_antigravity(snapshot_path)
+            if isinstance(payload, dict):
+                payload = dict(payload)
+                payload['refreshed'] = False
+                payload['throttled'] = True
+                payload['cooldownRemainingSec'] = max(1, int(round(cooldown_sec - (now - _ag_last_refresh_ts))))
+            return status, payload
+
+        if not bin_path or not os.path.isfile(bin_path) or not os.access(bin_path, os.X_OK):
+            status, payload = fetch_antigravity(snapshot_path)
+            if status == 200 and isinstance(payload, dict):
+                payload = dict(payload)
+                payload['refreshed'] = False
+                payload['refreshError'] = '未找到 agy CLI 可执行文件'
+                return 200, payload
+            return 502, {'error': '未找到 agy CLI 可执行文件'}
+
+        env = os.environ.copy()
+        env.setdefault('HOME', os.path.expanduser('~'))
+        try:
+            proc = runner(
+                [bin_path, 'models'],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            status, payload = fetch_antigravity(snapshot_path)
+            if status == 200 and isinstance(payload, dict):
+                payload = dict(payload)
+                payload['refreshed'] = False
+                payload['refreshError'] = f'同步超时（{timeout_sec}s），显示上次快照'
+                return 200, payload
+            return 504, {'error': f'agy models 同步超时（{timeout_sec}s）'}
+        except OSError as exc:
+            status, payload = fetch_antigravity(snapshot_path)
+            if status == 200 and isinstance(payload, dict):
+                payload = dict(payload)
+                payload['refreshed'] = False
+                payload['refreshError'] = f'执行失败: {exc}'
+                return 200, payload
+            return 502, {'error': f'agy models 执行失败: {exc}'}
+
+        _ag_last_refresh_ts = now_fn()
+        status, payload = fetch_antigravity(snapshot_path)
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload['refreshed'] = (proc.returncode == 0)
+            payload['throttled'] = False
+            if proc.returncode != 0:
+                payload['refreshError'] = f'agy models 退出码 {proc.returncode}'
+        return status, payload
 
 
 def fetch_generic_quota(api_url, api_key, provider_id, cache=_DEFAULT_CACHE):

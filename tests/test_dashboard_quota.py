@@ -165,6 +165,78 @@ class DashboardQuotaTests(unittest.TestCase):
         self.assertEqual(status4, 504)
         self.assertFalse(data4['cached'])
 
+    def test_refresh_antigravity_snapshot_runs_models_and_enforces_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snap = root / 'antigravity_quota.json'
+            fake_bin = root / 'agy'
+            fake_bin.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            fake_bin.chmod(0o755)
+            snap.write_text(json.dumps({
+                'updatedAt': 1_700_000_000_000,
+                'source': 'antigravity-cli-statusline',
+                'quota': {'gemini-5h': {'remaining_fraction': 0.8}},
+            }), encoding='utf-8')
+
+            calls = []
+            clock = [1000.0]
+
+            def fake_runner(cmd, **kwargs):
+                calls.append(cmd)
+                snap.write_text(json.dumps({
+                    'updatedAt': 1_700_000_050_000,
+                    'source': 'antigravity-cli-statusline',
+                    'quota': {'gemini-5h': {'remaining_fraction': 0.6}},
+                }), encoding='utf-8')
+                return subprocess.CompletedProcess(cmd, 0, stdout='ok', stderr='')
+
+            with patch.object(dq, '_ag_last_refresh_ts', 0.0):
+                status, payload = dq.refresh_antigravity_snapshot(
+                    str(snap),
+                    agy_bin=str(fake_bin),
+                    cooldown_sec=15,
+                    now_fn=lambda: clock[0],
+                    runner=fake_runner,
+                )
+                self.assertEqual(status, 200)
+                self.assertTrue(payload['refreshed'])
+                self.assertFalse(payload['throttled'])
+                self.assertEqual(payload['buckets'][0]['usedPercent'], 40.0)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0], [str(fake_bin), 'models'])
+
+                # Immediate repeat inside cooldown window should NOT spawn agy again
+                clock[0] = 1005.0
+                status2, payload2 = dq.refresh_antigravity_snapshot(
+                    str(snap),
+                    agy_bin=str(fake_bin),
+                    cooldown_sec=15,
+                    now_fn=lambda: clock[0],
+                    runner=fake_runner,
+                )
+                self.assertEqual(status2, 200)
+                self.assertFalse(payload2['refreshed'])
+                self.assertTrue(payload2['throttled'])
+                self.assertEqual(payload2['cooldownRemainingSec'], 10)
+                self.assertEqual(len(calls), 1)
+
+                # Timeout after cooldown should fall back to existing snapshot cleanly
+                clock[0] = 1020.0
+                def timeout_runner(cmd, **kwargs):
+                    raise subprocess.TimeoutExpired(cmd, 15)
+
+                status3, payload3 = dq.refresh_antigravity_snapshot(
+                    str(snap),
+                    agy_bin=str(fake_bin),
+                    cooldown_sec=15,
+                    now_fn=lambda: clock[0],
+                    runner=timeout_runner,
+                )
+                self.assertEqual(status3, 200)
+                self.assertFalse(payload3['refreshed'])
+                self.assertIn('超时', payload3['refreshError'])
+                self.assertEqual(payload3['buckets'][0]['usedPercent'], 40.0)
+
     def test_codex_valid_pct_contract(self):
         for valid in (0, 0.0, 14, 99.5, 100):
             self.assertTrue(dq.codex_valid_pct(valid))
@@ -279,6 +351,37 @@ class ServerRoutingAndHealthTests(unittest.TestCase):
         self.assertEqual(captured['status'], 200)
         self.assertEqual(len(captured['data']), 1)
         self.assertNotIn('apiKey', captured['data'][0])
+
+    def test_post_antigravity_refresh_route_local_and_auth_guard(self):
+        handler = server.H.__new__(server.H)
+        handler.path = '/quota/antigravity/refresh'
+        handler.client_address = ('127.0.0.1', 54322)
+        handler.headers = {}
+        handler.wfile = io.BytesIO()
+        captured = {}
+
+        def fake_send_json(status, data, extra_headers=None):
+            captured['status'] = status
+            captured['data'] = data
+
+        handler._send_json = fake_send_json
+        with patch.object(server, '_dq_refresh_antigravity', return_value=(200, {'available': True, 'refreshed': True})):
+            handler.do_POST()
+        self.assertEqual(captured['status'], 200)
+        self.assertTrue(captured['data']['refreshed'])
+
+        # Remote tunnel request without session cookie must hit auth challenge (302)
+        remote = server.H.__new__(server.H)
+        remote.path = '/quota/antigravity/refresh'
+        remote.client_address = ('198.51.100.1', 12345)
+        remote.headers = {'CF-Connecting-IP': '198.51.100.1'}
+        remote.wfile = io.BytesIO()
+        remote_responses = []
+        remote.send_response = lambda code: remote_responses.append(code)
+        remote.send_header = lambda k, v: None
+        remote.end_headers = lambda: None
+        remote.do_POST()
+        self.assertEqual(remote_responses, [302])
 
 
 if __name__ == '__main__':

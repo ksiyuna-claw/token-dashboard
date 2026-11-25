@@ -1,4 +1,4 @@
-"""Playwright UI tests for active projects status section, filters, expand toggle, and XSS escaping."""
+"""Playwright UI tests for dedicated active projects page tab, filters, manual rescan, and XSS escaping."""
 from contextlib import asynccontextmanager
 from pathlib import Path
 import tempfile
@@ -13,7 +13,7 @@ ORIGIN = 'http://token-dashboard.test'
 
 
 @asynccontextmanager
-async def projects_page(projects_payload):
+async def projects_page(projects_payload, refresh_urls):
     async with async_playwright() as playwright:
         with tempfile.TemporaryDirectory(prefix='dashboard-projects-chrome-') as profile:
             context = await playwright.chromium.launch_persistent_context(
@@ -32,6 +32,8 @@ async def projects_page(projects_payload):
                 elif url.path == '/':
                     await route.fulfill(content_type='text/html; charset=utf-8', body=TEMPLATE.read_bytes())
                 elif url.path == '/projects-status':
+                    if 'refresh=1' in url.query:
+                        refresh_urls.append(route.request.url)
                     await route.fulfill(json=projects_payload)
                 elif url.path == '/providers':
                     await route.fulfill(json=[])
@@ -57,7 +59,7 @@ async def projects_page(projects_payload):
 
 
 class ProjectsPageTests(unittest.IsolatedAsyncioTestCase):
-    async def test_projects_section_filters_expand_pending_rules_and_xss(self):
+    async def test_dedicated_projects_tab_filters_refresh_and_xss(self):
         now_ms = int(time.time() * 1000)
         projects = [
             {
@@ -175,21 +177,27 @@ class ProjectsPageTests(unittest.IsolatedAsyncioTestCase):
         }
 
         errors = []
-        async with projects_page(payload) as page:
+        refresh_urls = []
+        async with projects_page(payload, refresh_urls) as page:
             page.on('pageerror', lambda err: errors.append(str(err)))
-            await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 6")
+            await page.wait_for_function("document.getElementById('pageBadgeProjects').textContent === '7'")
+
+            # Default tab is 运营监控: monitor panel visible, projects panel hidden
+            self.assertTrue(await page.locator('#page-monitor').is_visible())
+            self.assertFalse(await page.locator('#page-projects').is_visible())
+
+            # Switch to 活跃项目 tab: all 7 cards render immediately
+            await page.locator('#pageTabs button[data-page="projects"]').click()
+            self.assertFalse(await page.locator('#page-monitor').is_visible())
+            self.assertTrue(await page.locator('#page-projects').is_visible())
+            await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 7")
 
             summary_text = await page.locator('#projectsSummary').inner_text()
             self.assertIn('7 个项目', summary_text)
             self.assertIn('待审规则 3 条', summary_text)
-
-            more_btn = page.locator('#projectsMoreWrap button')
-            self.assertIn('展开其余 1 个项目', await more_btn.inner_text())
-            await more_btn.click()
-            await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 7")
             self.assertIn('已完结归档项目', await page.locator('#projectGrid').inner_text())
 
-            # Filter tabs
+            # Filter tabs inside 活跃项目 page
             await page.locator('#projectTabs button[data-pfilter="active"]').click()
             await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 2")
             active_text = await page.locator('#projectGrid').inner_text()
@@ -198,12 +206,20 @@ class ProjectsPageTests(unittest.IsolatedAsyncioTestCase):
 
             await page.locator('#projectTabs button[data-pfilter="other"]').click()
             await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 2")
-            other_text = await page.locator('#projectGrid').inner_text()
-            self.assertIn('暂停试点', other_text)
-            self.assertIn('已完结归档项目', other_text)
 
             await page.locator('#projectTabs button[data-pfilter="decision"]').click()
             await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 1")
+
+            # Manual rescan button triggers ?refresh=1
+            await page.locator('#btnRefreshProjects').click()
+            await page.wait_for_function("document.getElementById('btnRefreshProjects').disabled === false")
+            self.assertEqual(len(refresh_urls), 1)
+            self.assertIn('refresh=1', refresh_urls[0])
+
+            # Switch back to 运营监控 tab
+            await page.locator('#pageTabs button[data-page="monitor"]').click()
+            self.assertTrue(await page.locator('#page-monitor').is_visible())
+            self.assertFalse(await page.locator('#page-projects').is_visible())
 
             self.assertIsNone(await page.evaluate('window.__xss'))
             self.assertEqual(errors, [])

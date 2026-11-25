@@ -13,7 +13,7 @@ ORIGIN = 'http://token-dashboard.test'
 
 
 @asynccontextmanager
-async def quota_page(providers, quotas, cron_payload=None):
+async def quota_page(providers, quotas, cron_payload=None, refresh_handler=None):
     async with async_playwright() as playwright:
         with tempfile.TemporaryDirectory(prefix='dashboard-quota-chrome-') as profile:
             context = await playwright.chromium.launch_persistent_context(
@@ -33,6 +33,9 @@ async def quota_page(providers, quotas, cron_payload=None):
                     await route.fulfill(content_type='text/html; charset=utf-8', body=TEMPLATE.read_bytes())
                 elif url.path == '/providers':
                     await route.fulfill(json=providers)
+                elif url.path == '/quota/antigravity/refresh' and route.request.method == 'POST':
+                    payload = refresh_handler() if refresh_handler else quotas.get('antigravity', {})
+                    await route.fulfill(json=payload)
                 elif url.path.startswith('/quota/'):
                     pid = url.path[len('/quota/'):]
                     await route.fulfill(json=quotas.get(pid, {'error': 'missing'}))
@@ -96,7 +99,25 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
         }
 
         errors = []
-        async with quota_page(providers, quotas, cron_payload=cron_payload) as page:
+        refresh_calls = []
+
+        def handle_refresh():
+            refresh_calls.append(len(refresh_calls) + 1)
+            if len(refresh_calls) == 1:
+                quotas['antigravity']['updatedAt'] = int(time.time() * 1000)
+                quotas['antigravity']['ageSec'] = 1
+                quotas['antigravity']['buckets'][0]['usedPercent'] = 33.3
+                out = dict(quotas['antigravity'])
+                out['refreshed'] = True
+                out['throttled'] = False
+                return out
+            out = dict(quotas['antigravity'])
+            out['refreshed'] = False
+            out['throttled'] = True
+            out['cooldownRemainingSec'] = 12
+            return out
+
+        async with quota_page(providers, quotas, cron_payload=cron_payload, refresh_handler=handle_refresh) as page:
             page.on('pageerror', lambda err: errors.append(str(err)))
             await page.wait_for_function("document.querySelectorAll('#providerGrid .card').length === 2")
             cards_text = await page.locator('#providerGrid').inner_text()
@@ -170,18 +191,17 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('AI Credits 余额', updated_text)
             self.assertIn('42', updated_text)
 
-            # Clicking refresh button when updatedAt is unchanged shows honest unchanged hint
+            # Clicking refresh button triggers POST /quota/antigravity/refresh and updates card in-place
             await page.locator('#btnRefreshAntigravity').click()
-            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('快照未变化')")
-
-            # Updating snapshot timestamp + percentage and clicking refresh updates card in-place
-            quotas['antigravity']['updatedAt'] = snap_ts + 120_000
-            quotas['antigravity']['ageSec'] = 5
-            quotas['antigravity']['buckets'][0]['usedPercent'] = 33.3
-            await page.locator('#btnRefreshAntigravity').click()
-            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('已读取最新快照')")
+            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('已实时同步最新余量')")
             refreshed_text = await page.locator('#providerGrid').inner_text()
             self.assertIn('33.3% 已用', refreshed_text)
+            self.assertNotIn('已恢复 恢复', refreshed_text)
+
+            # Second immediate click shows cooldown feedback cleanly
+            await page.locator('#btnRefreshAntigravity').click()
+            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('12秒冷却')")
+            self.assertEqual(len(refresh_calls), 2)
 
             # Once 3p has active consumption (>0%), expand to full progress row
             quotas['antigravity']['buckets'][2]['usedPercent'] = 15.0

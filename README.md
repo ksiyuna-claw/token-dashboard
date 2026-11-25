@@ -30,8 +30,8 @@
 | 区块 | 内容（代码实锤） | 数据源 |
 |------|------|--------|
 | 🦐 虾厂员工 | 13 位员工卡片。分别显示本人、分身或后台程序工作、等待审核／云端结果、空闲或状态待确认，保留模型标签+7个tab：主会话/心跳/子代理/Slash/微信Bot/系统/全部 | `/agent-status`（15秒轮询）+ `/sessions-json` |
-| 📦 模型供应商额度 | Codex / **Antigravity（2026-11-25上线：Google AI 订阅快照，紧挨 Codex 第 2 位，卡片右上角支持「🔄 刷新」手动重读快照）** / Kimi / 智谱国内 / NeuroSpark / RunPod / TikHub / DeepSeek（尾位）共 8 张卡 | `/providers` 列表 + `/quota/<id>` 由独立模块 `dashboard_quota.py` 统一代理与缓存（60s TTL+旧缓存兜底）。Codex=读 `~/.codex/auth.json` 调 ChatGPT 后端；**Antigravity=纯只读 `data/antigravity_quota.json` 本地脱敏快照（由官方 `agy` CLI `statusLine` 钩子自动落盘，不碰 Google OAuth 也不调 `agy`，界面标注采集时间、AI Credits 及手动重读快照按钮）**；RunPod/TikHub=`config.json`；NeuroSpark=`openclaw.json`+`curl_cffi` |
-| 📂 活跃项目进度 | **（2026-11-25上线）** 只读扫盘展示 ZHITAI `/Volumes/ZHITAI/codex_project/*` 与 OpenClaw `~/.openclaw/workspace/ai_workspace/projects/*` 各项目 `项目状态.md`（兼容标准 6 项头部与旧式纪要回退），支持全部/进行中/待拍板/纪要式/暂停·完结筛选、默认 6 张折叠展开与共享 `待审规则建议.md` 计数徽标 | `/projects-status`（2分钟轮询，后端 `dashboard_projects.py` + 30s TTL 缓存，严格排除 `workspace-xiaohexia`） |
+| 📦 模型供应商额度 | Codex / **Antigravity（2026-11-25上线：Google AI 订阅快照，紧挨 Codex 第 2 位，卡片右上角支持「🔄 刷新」触发零对话 `agy models` 实时同步余量）** / Kimi / 智谱国内 / NeuroSpark / RunPod / TikHub / DeepSeek（尾位）共 8 张卡 | `/providers` 列表 + `/quota/<id>` 由独立模块 `dashboard_quota.py` 统一代理与缓存（60s TTL+旧缓存兜底）。Codex=读 `~/.codex/auth.json` 调 ChatGPT 后端；**Antigravity=纯只读 `data/antigravity_quota.json` 本地脱敏快照（由官方 `agy` CLI `statusLine` 钩子自动落盘；点击卡片刷新按钮仅调官方零对话 `agy models` 子命令并带单飞锁与 15s 冷却，不碰 Google OAuth，界面标注采集时间及 AI Credits）**；RunPod/TikHub=`config.json`；NeuroSpark=`openclaw.json`+`curl_cffi` |
+| 📂 活跃项目进度 | **（2026-11-25上线，独立顶部页卡 `📂 活跃项目` / `#projects`）** 只读扫盘展示 ZHITAI `/Volumes/ZHITAI/codex_project/*` 与 OpenClaw `~/.openclaw/workspace/ai_workspace/projects/*` 各项目 `项目状态.md`（兼容标准 6 项头部与旧式纪要回退），支持全部/进行中/待拍板/纪要式/暂停·完结筛选、`🔄 刷新扫盘` 与共享 `待审规则建议.md` 计数徽标 | `/projects-status`（2分钟轮询，`?refresh=1` 强制重扫；后端 `dashboard_projects.py` + 30s TTL 缓存，严格排除 `workspace-xiaohexia`） |
 | 📦 Hermes 网关健康（2026-10-14 独立成区块，位于邮箱监控之前） | 进程状态 + 心跳 + watchdog触发记录 + **TG通道状态四态**（connected ✅绿 / retrying（Xs未恢复）黄 / 冻结 ⚠️红告警醒目 / unknown ❓灰）；纯读展示零探测逻辑，四态判定全在后端 | `/agent-status` 的 `hermesHealth`（新增 `tg_state`/`tg_state_age` 字段，15秒轮询）；同源 watchdog v5.2（30min双信号自愈：进程+心跳+TG状态）读 `~/.hermes/gateway_state.json` |
 | 📬 邮箱监控 | 未读邮件状态 | `email_monitor.py`（系统crontab每30分钟）写 `data/email_status.json` → `/email-status` |
 | 🩺 系统健康 | 6卡片：CPU/内存/Swap/磁盘/负载1m5m15m/CDP Chrome（含CDP异常警告条） | `/health-json`（30秒轮询） |
@@ -50,15 +50,16 @@ token_dashboard_server.py   ← HTTP服务 :18888（launchd常驻，项目目录
 dashboard_quota.py          ← 供应商发现、60s缓存兜底、各家额度代理与 Antigravity 本地快照适配器
 dashboard_projects.py       ← 活跃项目 项目状态.md 只读扫盘解析与待审规则计数
 dashboard_activity.py / dashboard_background.py / dashboard_status.py ← 员工工作状态实时采集三件套
-全部端点（13个）：
-  /                    ← 主页面（templates/token_dashboard.html）
-  /cron                ← 独立定时任务总览页（cron.html）
-  /login /logout       ← 登录/登出（公网访问鉴权）
-  /agent-status        ← 虾厂员工状态（15秒轮询）
-  /sessions-json       ← 会话数据（代理 openclaw sessions）
-  /providers           ← 供应商列表（按openclaw.json动态）
-  /quota/<id>          ← 各家额度代理
-  /projects-status     ← 活跃项目进度只读扫盘（2分钟轮询，30s缓存）
+全部端点（14个）：
+  /                          ← 主页面（templates/token_dashboard.html，含「📊 运营监控」与「📂 活跃项目」双页卡）
+  /cron                      ← 独立定时任务总览页（cron.html）
+  /login /logout             ← 登录/登出（公网访问鉴权）
+  /agent-status              ← 虾厂员工状态（15秒轮询）
+  /sessions-json             ← 会话数据（代理 openclaw sessions）
+  /providers                 ← 供应商列表（按openclaw.json动态）
+  /quota/<id>                ← 各家额度代理
+  POST /quota/antigravity/refresh ← 手动触发官方零对话 `agy models` 实时刷新本地配额快照（15s 冷却）
+  /projects-status           ← 活跃项目进度只读扫盘（2分钟轮询，30s缓存，`?refresh=1` 即时重扫）
   /cron-json           ← 定时任务四层数据（cron list+crontab -l+launchctl list+心跳）
   /email-status        ← 邮箱监控状态
   /system-tasks        ← 系统任务（15秒轮询）
