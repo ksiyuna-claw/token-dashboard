@@ -2,6 +2,13 @@
 
 ## 2026-11-25
 
+- **新增「📂 活跃项目进度」只读扫盘板块（水母 🪼，第二阶段交付）**：
+  1. **只读扫盘模块 `dashboard_projects.py`**：扫描 `/Volumes/ZHITAI/codex_project/*` 与 `~/.openclaw/workspace/ai_workspace/projects/*` 一级子目录下的 `项目状态.md`（支持 `config.json` 的 `project_scan_roots` 覆盖），兼容《共同记忆与收工落盘规范.md》标准 6 项头部与现有旧式纪要回退解析（倒序/正序/初始化标题与顶部更新段），并统计 `/Volumes/ZHITAI/codex_project/虾厂共同记忆/待审规则建议.md` 待审条数（过滤示例行）；严格排除 `workspace-xiaohexia`、隐藏目录及归档/临时目录。
+  2. **服务端与前端**：`token_dashboard_server.py` 新增 `@cached(30)` 的 `/projects-status` 只读端点；`templates/token_dashboard.html` 在「模型供应商额度」之后新增「📂 活跃项目进度」双列网格区块，支持「全部 / 进行中 / 待拍板 / 纪要式 / 暂停·完结」筛选、默认 6 张折叠展开切换（跨 2 分钟轮询保持状态）及全字段 `mEsc()` 转义。
+  3. **文档双同步**：同步更新 `README.md`、`CHANGELOG.md`、`Token看板系统运维_SOP.md` 与 `项目状态.md`。
+  4. **验证**：`py_compile` + `node --check` 通过；`unittest` **45/45** 全部通过（含新增 6 项单测与 Playwright UI 测试）；重启 `com.openclaw.token-dashboard` 后实测 `/projects-status` 返回 10 个真实项目（2 进行中 + 8 纪要式，待审规则 0 条），内置浏览器实测筛选/展开/收起交互与 0 报错通过。
+  5. **回滚**：`git revert <commit>` 后 `launchctl kickstart -k "gui/$(id -u)/com.openclaw.token-dashboard"`。
+
 - **生产运行目录迁移至 `/Volumes/ZHITAI/codex_project/token-dashboard/` 并交接水母 🪼 主维护（经董事长批准执行）**：
   1. **4 处生产路径切换**：
      - `~/Library/LaunchAgents/com.openclaw.token-dashboard.plist` 的 `WorkingDirectory` 切换至 `/Volumes/ZHITAI/codex_project/token-dashboard`（服务标签 `com.openclaw.token-dashboard`、端口 `18888`、日志目录 `~/.openclaw/logs/token-dashboard/` 与跨项目密码源 `_AUTH_ENV_PATH` 均保持不变）；

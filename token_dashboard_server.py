@@ -53,6 +53,7 @@ from dashboard_quota import (
     get_providers as _dq_get_providers,
     fetch_quota as _dq_fetch_quota,
 )
+from dashboard_projects import scan_active_projects as _scan_active_projects
 
 def _load_auth_password():
     """从量化看板 .env 读取 DASHBOARD_PASSWORD"""
@@ -647,6 +648,11 @@ def _last_actual_model(session_id, agent_id):
 def _get_providers():
     """从 openclaw.json + auth-profiles.json + config.json 读取 providers 配置"""
     return _dq_get_providers(OPENCLAW_JSON, AUTH_PROFILES, _PROJECT_DIR)
+
+@cached(30)
+def _get_projects_status():
+    """只读扫盘读取活跃项目 项目状态.md"""
+    return _scan_active_projects(project_dir=_PROJECT_DIR)
 
 # ── 用途标注（服务/调度 → 所属项目）──────────────────────────
 # 2026-08-27 全量对齐 sqlite 实际 job 名（旧键名与现名不符致总览页用途列大面积"—"，匡书记报修）
@@ -1923,6 +1929,13 @@ class H(http.server.SimpleHTTPRequestHandler):
                         data = json.load(f)
                 else:
                     data = {'unread_count': 0, 'new_count': 0, 'last_check': None, 'recent_new': [], 'note': '尚未运行'}
+            except Exception as e:
+                data = {'error': str(e)}
+            self._send_json(200, data)
+        elif req_path == '/projects-status':
+            """活跃项目 项目状态.md 只读扫盘"""
+            try:
+                data = _get_projects_status()
             except Exception as e:
                 data = {'error': str(e)}
             self._send_json(200, data)
