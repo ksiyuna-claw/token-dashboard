@@ -25,21 +25,22 @@
 | 公网 | https://token-dashboard.crypto-signal.work/ | cloudflared `quant-dashboard` 隧道（与量化看板家族共用，配置在 `~/.cloudflared/config.yml`）。**传输协议=http2（TCP 443）**，2026-10-16 起长期固定：当日家网持续阻断 UDP 7844（QUIC）致整条隧道 530/1033，降级 http2 后恢复且为官方标准处置；**勿切回 quic**（该网络 UDP 长会话不可靠，且显式钉 quic 会关闭自动降级）。根因分析与排障档案：`ai_workspace/tickets/1016-cloudflared隧道修复/` |
 | 手机查数 | TG发「查token」 | 触发 `ai_workspace/scripts/token_usage_push.py` 推送（手动口令模式，无自动调度） |
 
-## 功能全景（页面8区块+额度告警逻辑，2026-11-25 实测核实）
+## 功能全景（3大页卡7大区块+额度告警逻辑，2026-11-26 实测核实）
 
-| 区块 | 内容（代码实锤） | 数据源 |
+页面顶部为 3 个可切换页卡（支持 `#monitor` / `#projects` / `#ops` 与角标异常透传）：**`📊 运营监控`**（默认首页）、**`📂 活跃项目`**、**`⚙️ 运维与任务`**。
+
+| 区块（所属页卡） | 内容（代码实锤） | 数据源 |
 |------|------|--------|
-| 🦐 虾厂员工 | 13 位员工卡片。分别显示本人、分身或后台程序工作、等待审核／云端结果、空闲或状态待确认，保留模型标签+7个tab：主会话/心跳/子代理/Slash/微信Bot/系统/全部 | `/agent-status`（15秒轮询）+ `/sessions-json` |
-| 📦 模型供应商额度 | Codex / **Antigravity（2026-11-25上线：Google AI 订阅快照，紧挨 Codex 第 2 位，卡片右上角支持「🔄 刷新」触发零对话 `agy models` 实时同步余量）** / Kimi / 智谱国内 / NeuroSpark / RunPod / TikHub / DeepSeek（尾位）共 8 张卡 | `/providers` 列表 + `/quota/<id>` 由独立模块 `dashboard_quota.py` 统一代理与缓存（60s TTL+旧缓存兜底）。Codex=读 `~/.codex/auth.json` 调 ChatGPT 后端；**Antigravity=纯只读 `data/antigravity_quota.json` 本地脱敏快照（由官方 `agy` CLI `statusLine` 钩子自动落盘；点击卡片刷新按钮仅调官方零对话 `agy models` 子命令并带单飞锁与 15s 冷却，不碰 Google OAuth，界面标注采集时间及 AI Credits）**；RunPod/TikHub=`config.json`；NeuroSpark=`openclaw.json`+`curl_cffi` |
-| 📂 活跃项目进度 | **（2026-11-25上线，独立顶部页卡 `📂 活跃项目` / `#projects`）** 只读扫盘展示 ZHITAI `/Volumes/ZHITAI/codex_project/*` 与 OpenClaw `~/.openclaw/workspace/ai_workspace/projects/*` 各项目 `项目状态.md`（兼容标准 6 项头部与旧式纪要回退），支持全部/进行中/待拍板/纪要式/暂停·完结筛选、`🔄 刷新扫盘` 与共享 `待审规则建议.md` 计数徽标 | `/projects-status`（2分钟轮询，`?refresh=1` 强制重扫；后端 `dashboard_projects.py` + 30s TTL 缓存，严格排除 `workspace-xiaohexia`） |
-| 📦 Hermes 网关健康（2026-10-14 独立成区块，位于邮箱监控之前） | 进程状态 + 心跳 + watchdog触发记录 + **TG通道状态四态**（connected ✅绿 / retrying（Xs未恢复）黄 / 冻结 ⚠️红告警醒目 / unknown ❓灰）；纯读展示零探测逻辑，四态判定全在后端 | `/agent-status` 的 `hermesHealth`（新增 `tg_state`/`tg_state_age` 字段，15秒轮询）；同源 watchdog v5.2（30min双信号自愈：进程+心跳+TG状态）读 `~/.hermes/gateway_state.json` |
-| 📬 邮箱监控 | 未读邮件状态 | `email_monitor.py`（系统crontab每30分钟）写 `data/email_status.json` → `/email-status` |
-| 🩺 系统健康 | 6卡片：CPU/内存/Swap/磁盘/负载1m5m15m/CDP Chrome（含CDP异常警告条） | `/health-json`（30秒轮询） |
-| ⏱ **定时任务**（2026-09-07上线，四层折叠） | ① OpenClaw闹钟表：任务名/Agent/用途/周期/上次执行/状态/下次执行/模型（8列；用途列=静态字典+前缀规则动态生成零维护）② 系统crontab ③ LaunchAgent ④ 心跳表；**内嵌子块**：Gateway健康+Web前端轮询说明表（Hermes网关健康2026-10-14独立成区块上移至邮箱监控之前）；另有独立总览页 `/cron` | `/cron-json` 读 `openclaw cron list` 等（5分钟轮询） |
-| 📊 总览 | 6卡片：员工总数/总Session/主会话/子代理/总输入Token/总输出Token | 前端聚合sessions数据 |
-| 🖥️ 系统任务 | 系统级任务卡片 | `/system-tasks`（15秒轮询） |
+| 🦐 虾厂员工（运营监控） | 13 位员工卡片。分别显示本人、分身或后台程序工作、等待审核／云端结果、空闲或状态待确认，保留模型标签+7个tab：主会话/心跳/子代理/Slash/微信Bot/系统/全部 | `/agent-status`（15秒轮询）+ `/sessions-json` |
+| 📦 模型供应商额度（运营监控） | Codex / **Antigravity（2026-11-25上线：Google AI 订阅快照，紧挨 Codex 第 2 位，卡片右上角支持「🔄 刷新」触发零对话 `agy models` 实时同步余量）** / Kimi / 智谱国内 / NeuroSpark / RunPod / TikHub / DeepSeek（尾位）共 8 张卡 | `/providers` 列表 + `/quota/<id>` 由独立模块 `dashboard_quota.py` 统一代理与缓存（60s TTL+旧缓存兜底）。Codex=读 `~/.codex/auth.json` 调 ChatGPT 后端；**Antigravity=纯只读 `data/antigravity_quota.json` 本地脱敏快照（由官方 `agy` CLI `statusLine` 钩子自动落盘；点击卡片刷新按钮仅调官方零对话 `agy models` 子命令并带单飞锁与 15s 冷却，不碰 Google OAuth，界面标注采集时间及 AI Credits）**；RunPod/TikHub=`config.json`；NeuroSpark=`openclaw.json`+`curl_cffi` |
+| 📦 Hermes 网关健康（运营监控） | 进程状态 + 心跳 + watchdog触发记录 + **TG通道状态四态**（connected ✅绿 / retrying（Xs未恢复）黄 / 冻结 ⚠️红告警醒目 / unknown ❓灰）；纯读展示零探测逻辑，四态判定全在后端 | `/agent-status` 的 `hermesHealth`（新增 `tg_state`/`tg_state_age` 字段，15秒轮询）；同源 watchdog v5.2（30min双信号自愈：进程+心跳+TG状态）读 `~/.hermes/gateway_state.json` |
+| 📬 邮箱监控（运营监控） | 未读邮件与今日收件状态；瞬时抖动/重启时保留上次正常数据并 15 秒自动重试，登录过期直报提示 | `email_monitor.py`（系统crontab每30分钟）写 `data/email_status.json` → `/email-status`（2分钟轮询） |
+| 🩺 系统健康（运营监控） | **7 卡片**：CPU / 内存 / Swap / 内置磁盘已用 / **ZHITAI 外置盘（容量与挂载状态）** / 负载 1m5m15m / CDP Chrome（含CDP异常警告条） | `/health-json`（30秒轮询） |
+| 📂 活跃项目进度（独立页卡 `#projects`） | **（2026-11-25上线）** 只读扫盘展示 ZHITAI `/Volumes/ZHITAI/codex_project/*` 与 OpenClaw `~/.openclaw/workspace/ai_workspace/projects/*` 各项目 `项目状态.md`（兼容标准 6 项头部与旧式纪要回退），支持全部/进行中/待拍板/纪要式/暂停·完结筛选、`🔄 刷新扫盘` 与共享 `待审规则建议.md` 计数徽标 | `/projects-status`（2分钟轮询，`?refresh=1` 强制重扫；后端 `dashboard_projects.py` + 30s TTL 缓存，严格排除 `workspace-xiaohexia`） |
+| ⏱ 定时任务（运维与任务 `#ops`） | ① OpenClaw闹钟表（8列；静态字典+前缀规则动态生成，全量用途补全）② 系统crontab ③ LaunchAgent（含 `com.openclaw.*`/`com.shrimp.*`/`local.jgy-*`/`ai.*` 共20项）④ 心跳表；**内嵌子块**：Gateway健康+Web前端轮询说明表；另有独立总览页 `/cron` | `/cron-json` 读 `openclaw cron list` 等（5分钟轮询） |
+| 🖥️ 系统任务（运维与任务 `#ops`） | 13 项现役非 Gateway 衍生定时脚本与 launchd 常驻服务监控（巡检/备份/邮件/聚光萤站点及 worker/语音代理/国学 bot） | `/system-tasks`（15秒轮询） |
 
-**页面刷新机制**：虾厂状态+系统任务15秒 / 系统健康30秒 / 活跃项目扫盘+邮箱2分钟 / 额度+会话+定时任务5分钟（四档轮询，均不消耗token）
+**页面刷新机制**：虾厂状态+系统任务15秒 / 系统健康30秒 / 活跃项目扫盘+邮箱2分钟（邮箱瞬时失败15秒自动重试） / 额度+会话+定时任务5分钟（Antigravity 支持按钮实时同步，均不消耗LLM对话token）
 
 **监控覆盖边界（设计如此，非遗漏）**：dashscope（阿里百炼）只跑ASR/声图不走LLM——不监控；火山ark推理key查不了余额——不监控；硅基流动旧余额端点已废弃——暂不监控。
 
@@ -51,7 +52,7 @@ dashboard_quota.py          ← 供应商发现、60s缓存兜底、各家额度
 dashboard_projects.py       ← 活跃项目 项目状态.md 只读扫盘解析与待审规则计数
 dashboard_activity.py / dashboard_background.py / dashboard_status.py ← 员工工作状态实时采集三件套
 全部端点（14个）：
-  /                          ← 主页面（templates/token_dashboard.html，含「📊 运营监控」与「📂 活跃项目」双页卡）
+  /                          ← 主页面（templates/token_dashboard.html，含「📊 运营监控」「📂 活跃项目」「⚙️ 运维与任务」3页卡）
   /cron                      ← 独立定时任务总览页（cron.html）
   /login /logout             ← 登录/登出（公网访问鉴权）
   /agent-status              ← 虾厂员工状态（15秒轮询）

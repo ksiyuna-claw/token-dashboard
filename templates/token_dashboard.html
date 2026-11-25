@@ -184,6 +184,7 @@
 <div class="page-tabs" id="pageTabs" role="tablist">
   <button type="button" class="page-tab active" data-page="monitor" role="tab" aria-selected="true" onclick="switchPageTab('monitor')">📊 运营监控</button>
   <button type="button" class="page-tab" data-page="projects" role="tab" aria-selected="false" onclick="switchPageTab('projects')">📂 活跃项目<span class="tab-badge" id="pageBadgeProjects">0</span></button>
+  <button type="button" class="page-tab" data-page="ops" role="tab" aria-selected="false" onclick="switchPageTab('ops')">⚙️ 运维与任务<span class="tab-badge" id="pageBadgeOps">…</span></button>
 </div>
 
 <div class="page-panel" id="page-monitor">
@@ -224,12 +225,15 @@
     <div class="summary-card"><div class="val" id="hMem">...</div><div class="lbl">内存</div></div>
     <div class="summary-card"><div class="val" id="hSwap">...</div><div class="lbl">Swap</div></div>
     <div class="summary-card"><div class="val" id="hDisk">...</div><div class="lbl">磁盘已用</div></div>
+    <div class="summary-card"><div class="val" id="hZhitai">...</div><div class="lbl">ZHITAI 外置盘</div></div>
     <div class="summary-card"><div class="val" id="hLoad">...</div><div class="lbl">负载 1m/5m/15m</div></div>
     <div class="summary-card"><div class="val" id="hCdp">...</div><div class="lbl">CDP Chrome</div></div>
   </div>
   <div id="cdpWarn" style="display:none;margin-top:10px;padding:8px 12px;background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.3);border-radius:6px;font-size:12px;color:var(--red)"></div>
 </div>
+</div>
 
+<div class="page-panel hidden" id="page-ops">
 <div class="section" id="cronSection">
   <div class="section-title">⏱ 定时任务</div>
   <div class="cron-subtitle" id="cronSubtitle">正在获取...</div>
@@ -247,21 +251,17 @@
   </details>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🧠 Gateway 健康</div><div id="gatewayHealthBox" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim)">加载中...</div></div>
   <div style="margin-bottom:16px"><div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--fg)">🔄 Web前端轮询</div><div class="cron-table"><table><thead><tr><th>页面</th><th>刷新周期</th><th>说明</th></tr></thead><tbody>
-  <tr><td>🦐 Token看板</td><td>每15秒</td><td>虾厂工作状态轮询（不消耗token）</td></tr>
-  <tr><td>🦐 Token看板</td><td>每30秒</td><td>系统健康数据轮询</td></tr>
-  <tr><td>🦐 Token看板</td><td>每5分钟</td><td>模型供应商额度轮询（随员工会话刷新触发，服务端额度缓存60s基本不命中）</td></tr>
-  <tr><td>🦐 Token看板</td><td>每5分钟</td><td>员工会话 + 定时任务列表刷新</td></tr>
-  <tr><td>🦐 Token看板</td><td>每2分钟</td><td>活跃项目进度扫盘 + 邮箱监控刷新</td></tr>
+  <tr><td>📊 运营监控</td><td>每15秒</td><td>虾厂工作状态轮询（不消耗token）</td></tr>
+  <tr><td>📊 运营监控</td><td>每30秒</td><td>系统健康（含 ZHITAI 外置盘）数据轮询</td></tr>
+  <tr><td>📊 运营监控</td><td>每2分钟 / 失败15秒重试</td><td>邮箱监控状态轮询（保留上次正常显示）</td></tr>
+  <tr><td>📊 运营监控</td><td>每5分钟 + 手动刷新</td><td>模型供应商额度轮询（Antigravity 支持按钮零对话实时同步）</td></tr>
+  <tr><td>📂 活跃项目</td><td>每2分钟 + 手动扫盘</td><td>活跃项目 项目状态.md 只读扫盘（支持 ?refresh=1 即时重扫）</td></tr>
+  <tr><td>⚙️ 运维与任务</td><td>每5分钟 / 每15秒</td><td>定时任务四层（5分钟）+ 系统任务进程（15秒）</td></tr>
   </tbody></table></div></div>
   <details class="cron-fold" id="heartbeatTableWrap" style="display:none">
     <summary><span class="fold-arrow">▶</span>🫀 心跳配置<span class="fold-count" id="sumHeartbeat">…</span></summary>
     <div class="fold-body"><div class="cron-table"><table><thead><tr><th>虾</th><th>心跳周期</th><th>投递目标</th><th>状态</th></tr></thead><tbody id="heartbeatBody"></tbody></table></div></div>
   </details>
-</div>
-
-<div class="section">
-  <div class="section-title">📊 总览</div>
-  <div class="summary-grid" id="summaryGrid"><div class="loading">正在获取...</div></div>
 </div>
 
 <div class="section" id="systemTaskSection">
@@ -1102,16 +1102,6 @@ function renderAgentCards() {
   else if (!fresh || counts.unknown) updated.textContent = '员工状态待确认' + stamp;
   else updated.textContent = clock ? '员工状态更新于 ' + clock : '员工状态已更新';
   updated.style.color = fresh && !counts.unknown ? 'var(--green)' : 'var(--dim)';
-
-  // 总览
-  document.getElementById('summaryGrid').innerHTML = [
-    {lbl:'员工总数', val:AGENT_ORDER.length},
-    {lbl:'总 Session', val:_allSessions.length},
-    {lbl:'主会话', val:(_categoryCounts.direct||0)},
-    {lbl:'子代理', val:(_categoryCounts.subagent||0)},
-    {lbl:'总输入 Token', val:fmt(totalIn)},
-    {lbl:'总输出 Token', val:fmt(totalOut)},
-  ].map(x=>`<div class="summary-card"><div class="val">${x.val}</div><div class="lbl">${x.lbl}</div></div>`).join('');
 }
 
 async function refresh() {
@@ -1158,6 +1148,26 @@ async function fetchHealth() {
         ? ('已用 ' + d.disk_used_gb + 'G / 共 ' + d.disk_total_gb + 'G')
         : '已用磁盘空间比例';
       diskEl.style.color = d.disk_pct > 90 ? 'var(--red)' : d.disk_pct > 80 ? 'var(--yellow)' : 'var(--green)';
+    }
+
+    // ZHITAI 外置盘容量与挂载状态
+    const zhEl = document.getElementById('hZhitai');
+    if (zhEl) {
+      if (d.zhitai_mounted === false) {
+        zhEl.textContent = '❌ 未挂载';
+        zhEl.title = '外置盘 /Volumes/ZHITAI 未挂载或不可读';
+        zhEl.style.color = 'var(--red)';
+      } else if (d.zhitai_pct == null) {
+        zhEl.textContent = '—';
+        zhEl.title = '外置盘状态未知';
+        zhEl.style.color = 'var(--dim)';
+      } else {
+        zhEl.textContent = d.zhitai_pct + '%';
+        zhEl.title = (d.zhitai_used_gb != null && d.zhitai_total_gb != null)
+          ? ('已用 ' + d.zhitai_used_gb + 'G / 共 ' + d.zhitai_total_gb + 'G（剩余 ' + (d.zhitai_free_gb != null ? d.zhitai_free_gb : '?') + 'G）')
+          : 'ZHITAI 外置盘已用比例';
+        zhEl.style.color = d.zhitai_pct > 90 ? 'var(--red)' : d.zhitai_pct > 80 ? 'var(--yellow)' : 'var(--green)';
+      }
     }
     
     // 负载
@@ -1248,6 +1258,19 @@ async function fetchCron() {
     const laOn = laAll.filter(a => a.status === 'running' || a.status === 'loaded');
     const laStop = laAll.filter(a => a.status === 'stopped');
     document.getElementById('cronSubtitle').textContent = `OpenClaw ${ocAct.length} 启用/${ocDis.length} 停用 · Crontab ${ctAct.length} 活跃/${ctDis.length} 停用 · 服务 ${laOn.length} 在役/${laStop.length} 停止`;
+
+    const opsBadge = document.getElementById('pageBadgeOps');
+    if (opsBadge) {
+      if (errN > 0) {
+        opsBadge.textContent = '❌' + errN;
+        opsBadge.style.background = 'rgba(248,81,73,0.22)';
+        opsBadge.style.color = 'var(--red)';
+      } else {
+        opsBadge.textContent = String(ocAct.length + ctAct.length + laOn.length);
+        opsBadge.style.background = '';
+        opsBadge.style.color = '';
+      }
+    }
 
     // 各层折叠摘要（2026-09-07 方案③：默认视图短，只看计数+异常，点开看明细）
     const setSum = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
@@ -1467,17 +1490,35 @@ async function fetchAgentStatus() {
 }
 
 // ===== 邮箱监控模块 =====
+let _emailRetryTimer = null;
+let _lastEmailOkHtml = null;
+
+function scheduleEmailRetry() {
+  if (!_emailRetryTimer) {
+    _emailRetryTimer = setTimeout(() => { _emailRetryTimer = null; fetchEmailStatus(); }, 15000);
+  }
+}
+
 async function fetchEmailStatus() {
+  const card = document.getElementById('emailCard');
+  const summary = document.getElementById('emailSummary');
   try {
-    const r = await fetch('/email-status');
+    const r = await fetch('/email-status?t=' + Date.now(), { cache: 'no-store' });
+    if (r.redirected || /\/login(\?|$)/.test(r.url)) throw new Error('登录已过期，请刷新页面重新登录');
+    if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) {
+      throw new Error('服务重启或网络抖动（HTTP ' + r.status + '），15秒后重试');
+    }
     const d = await r.json();
-    const card = document.getElementById('emailCard');
-    const summary = document.getElementById('emailSummary');
 
     if (d.error) {
       card.innerHTML = '<div class="error">⚠️ ' + mEsc(d.error) + '</div>';
       summary.textContent = '';
       return;
+    }
+
+    if (_emailRetryTimer) {
+      clearTimeout(_emailRetryTimer);
+      _emailRetryTimer = null;
     }
 
     const unread = d.unread_count || 0;
@@ -1518,9 +1559,27 @@ async function fetchEmailStatus() {
     }
 
     html += '</div>';
+    _lastEmailOkHtml = html;
     card.innerHTML = html;
   } catch (e) {
-    document.getElementById('emailCard').innerHTML = '<div class="error">⚠️ 邮件状态获取失败</div>';
+    const msg = (e && e.message) ? e.message : '网络异常';
+    const isAuthErr = msg.includes('登录已过期');
+    if (isAuthErr) {
+      card.innerHTML = '<div class="error">⚠️ ' + mEsc(msg) + '</div>';
+      summary.textContent = '需重新登录';
+      summary.style.color = 'var(--red)';
+      return;
+    }
+    if (_lastEmailOkHtml) {
+      card.innerHTML = _lastEmailOkHtml;
+      summary.textContent = '⚠️ 暂时失联，15秒后自动重试';
+      summary.style.color = 'var(--yellow)';
+    } else {
+      card.innerHTML = '<div class="error">⚠️ 邮件状态获取失败：' + mEsc(msg) + '</div>';
+      summary.textContent = '15秒后重试';
+      summary.style.color = 'var(--yellow)';
+    }
+    scheduleEmailRetry();
   }
 }
 
@@ -1583,10 +1642,10 @@ async function fetchSystemTasks() {
   }
 }
 
-// ===== 顶层页面页卡切换（2026-11-25 运营监控 / 活跃项目）=====
+// ===== 顶层页面页卡切换（2026-11-25 运营监控 / 活跃项目 / 运维与任务）=====
 let _activePageTab = 'monitor';
 function switchPageTab(pageName, opts) {
-  const target = pageName === 'projects' ? 'projects' : 'monitor';
+  const target = (pageName === 'projects' || pageName === 'ops') ? pageName : 'monitor';
   _activePageTab = target;
   document.querySelectorAll('#pageTabs .page-tab').forEach(btn => {
     const on = btn.dataset.page === target;
@@ -1595,10 +1654,12 @@ function switchPageTab(pageName, opts) {
   });
   const monEl = document.getElementById('page-monitor');
   const projEl = document.getElementById('page-projects');
+  const opsEl = document.getElementById('page-ops');
   if (monEl) monEl.classList.toggle('hidden', target !== 'monitor');
   if (projEl) projEl.classList.toggle('hidden', target !== 'projects');
+  if (opsEl) opsEl.classList.toggle('hidden', target !== 'ops');
   if (!(opts && opts.skipHash)) {
-    const nextHash = target === 'projects' ? '#projects' : '#monitor';
+    const nextHash = '#' + target;
     if (window.location.hash !== nextHash) {
       try { history.replaceState(null, '', nextHash); } catch (_) { window.location.hash = nextHash; }
     }
@@ -1608,7 +1669,8 @@ function switchPageTab(pageName, opts) {
   }
 }
 window.addEventListener('hashchange', () => {
-  switchPageTab(window.location.hash === '#projects' ? 'projects' : 'monitor', { skipHash: true });
+  const h = window.location.hash.replace('#', '');
+  switchPageTab((h === 'projects' || h === 'ops') ? h : 'monitor', { skipHash: true });
 });
 
 // ===== 活跃项目进度模块（2026-11-25 只读扫盘）=====
@@ -1664,10 +1726,13 @@ function renderProjects() {
   const otherCount = (counts.paused != null ? counts.paused : all.filter(p => p.statusKey === 'paused').length)
     + (counts.done != null ? counts.done : all.filter(p => p.statusKey === 'done').length);
 
+  const pr = d.pendingRules;
+  const pendingRulesCount = (pr && pr.available) ? (Number(pr.pendingCount) || 0) : 0;
   if (topBadge) {
     topBadge.textContent = String(totalCount);
-    topBadge.style.background = decisionCount > 0 ? 'rgba(210,153,34,0.22)' : '';
-    topBadge.style.color = decisionCount > 0 ? 'var(--yellow)' : '';
+    const needAttention = decisionCount > 0 || pendingRulesCount > 0;
+    topBadge.style.background = needAttention ? 'rgba(210,153,34,0.22)' : '';
+    topBadge.style.color = needAttention ? 'var(--yellow)' : '';
   }
 
   const setBadge = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = String(val); };
@@ -1680,9 +1745,8 @@ function renderProjects() {
   const summaryParts = [`共 ${mEsc(totalCount)} 个项目`];
   if (activeCount > 0) summaryParts.push(`${mEsc(activeCount)} 进行中`);
   if (decisionCount > 0) summaryParts.push(`<span style="color:var(--yellow);font-weight:600">${mEsc(decisionCount)} 待拍板</span>`);
-  const pr = d.pendingRules;
   if (pr && pr.available) {
-    const pc = Number(pr.pendingCount) || 0;
+    const pc = pendingRulesCount;
     summaryParts.push(pc > 0
       ? `<span style="color:var(--yellow);font-weight:600">📝 待审规则 ${mEsc(pc)} 条</span>`
       : `📝 待审规则 0 条`);
@@ -1758,8 +1822,8 @@ async function fetchProjectsStatus(forceRefresh) {
   }
 }
 
-if (window.location.hash === '#projects') {
-  switchPageTab('projects', { skipHash: true });
+if (window.location.hash === '#projects' || window.location.hash === '#ops') {
+  switchPageTab(window.location.hash.slice(1), { skipHash: true });
 }
 
 fetchAgentStatus();

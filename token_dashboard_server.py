@@ -658,10 +658,14 @@ def _get_projects_status():
 # ── 用途标注（服务/调度 → 所属项目）──────────────────────────
 # 2026-08-27 全量对齐 sqlite 实际 job 名（旧键名与现名不符致总览页用途列大面积"—"，匡书记报修）
 CRON_PURPOSE = {
-    'Git自动备份': '运维 · 虾厂Git自动备份（每天06:56，flash灰度中）',
+    'Git自动备份': '运维 · 虾厂 Git 自动备份（每天 06:56）',
     '凌晨巡检(06:00)': '运维 · 基围虾清晨系统巡检（quiet只报紧急异常）',
     'tg-keepalive': '保活 · 凌晨护TG连接（防闲置掐线，05:00-06:55每5分钟getMe，零token，2026-10-11上线）',
     '晚间巡检(21:15)': '运维 · 基围虾晚间综合巡检（当日全量汇报）',
+    '人生规划月报': '规划 · 匡书记人生规划月度复盘报告（罗氏虾，每月1日 10:00）',
+    '会话数据每周维护（sessions cleanup）': '运维 · OpenClaw 会话历史每周清理维护（罗氏虾，周日 03:00）',
+    '巨猫-每周数据回收（皮皮虾）': '内容 · AIGC 自媒体巨猫每周数据回收与复盘（皮皮虾，周一 10:07）',
+    '聚光萤五平台日采': '聚光萤 · 五平台（小红书/抖音/B站/微博/百度）每日 05:00 热榜采集',
     '看脸实验室-每日内容（皮皮虾）': '内容 · 看脸实验室每日内容生产（kimi/k3.1-pro）',
     '看脸实验室-每周选题补充（皮皮虾）': '内容 · 看脸实验室每周选题池补充',
     '颜姐-每日内容卡片（皮皮虾）': '内容 · 颜姐日推卡片生成（v3.1换马kimi/k3.1-pro）',
@@ -674,6 +678,12 @@ CRON_PURPOSE = {
     '[手动停用] 每周前沿Agent研究扫描': 'AI研究 · Agent前沿周扫（历史停用，心跳方向3覆盖）',
     '[手动停用] AI视频行业日报(周二)': '内容 · AI视频行业周报（历史停用）',
     '[手动停用] shanbei-daily-quant-lesson': '量化看板 · 扇贝每日量化课（历史停用）',
+    '1105-browser-cutover-followup': '运维 · 浏览器切换跟进提醒（历史一次性任务，已停用）',
+    'yield回归c报告_明早发送': '运维 · yield 回归验证报告定时发送（历史一次性任务，已停用）',
+    '聚光萤微博日采': '聚光萤 · 微博单平台日采（已并入五平台日采，已停用）',
+    '路由修复盯梢+重启执行': '运维 · 模型路由修复盯梢与重启（历史一次性任务，已停用）',
+    '黑马deploy编码bug修复提醒': '聚光萤 · 黑马站点部署编码 bug 修复提醒（历史一次性任务，已停用）',
+    '1111-stats-flow2-continuation': '运维 · 统计流接续检查（历史一次性任务，已停用）',
 }
 
 def _cron_purpose_fill(name, enabled=True):
@@ -756,17 +766,19 @@ def _crontab_purpose(full_cmd, line=''):
     elif 'data_collector.py' in full_cmd and 'ai影视' in full_cmd:
         return '[AI影视] 每日数据采集+AI质检（比赛/工具/资讯）'
     elif 'email_monitor' in full_cmd:
-        return '[Token看板] 邮件监听（新邮件推送TG）'
+        return '[Token看板] 邮件监听（每 30 分钟查未读，新邮件推 TG + 写看板状态）'
     elif 'gateway_restart' in full_cmd:
         return '[虾厂运维] Gateway 定时重启（每天04:00，释放V8堆碎片+session缓存）'
     elif 'cloud_monitor' in full_cmd:
         return '[聚光萤] 云端服务监控（每30分钟，异常时TG告警）'
     elif 'backup.sh' in full_cmd or 'zhitai' in full_cmd:
-        return '[虾厂运维] 智泰硬盘全量备份（每天06:56，成功/失败TG推送）'
+        return '[虾厂运维] 智泰硬盘全量备份（每天 07:30 rsync ~/.openclaw + 公共Skill，成功/失败TG推送）'
     elif 'gateway_log_rotate' in full_cmd:
         return '[虾厂运维] Gateway 日志轮转（每小时25分，防日志膨胀）'
     elif 'du_snapshot' in full_cmd:
         return '[虾厂运维] 全厂du磁盘快照（每天06:55，存储卫生治理M3，2026-08-30上线）'
+    elif 'prune_session_heads' in full_cmd:
+        return '[虾厂运维] 周日清理 session_heads 陈旧行（每周日 03:05，防 sqlite 膨胀）'
     return ''
 
 @cached(30)
@@ -848,6 +860,25 @@ def _get_system_health():
             result['disk_pct'] = None
             result['disk_error'] = 'unavailable: ' + type(_de).__name__
 
+        # ZHITAI 外置盘容量与挂载状态（看板、活跃项目与备份所在盘）
+        _zhitai_path = '/Volumes/ZHITAI'
+        try:
+            if os.path.ismount(_zhitai_path) or os.path.isdir(_zhitai_path):
+                _zdu = shutil.disk_usage(_zhitai_path)
+                result['zhitai_mounted'] = True
+                result['zhitai_total_gb'] = round(_zdu.total / 1073741824, 1)
+                result['zhitai_used_gb'] = round(_zdu.used / 1073741824, 1)
+                result['zhitai_free_gb'] = round(_zdu.free / 1073741824, 1)
+                result['zhitai_pct'] = int(round(_zdu.used / _zdu.total * 100))
+                result.pop('zhitai_error', None)
+            else:
+                result['zhitai_mounted'] = False
+                result['zhitai_pct'] = None
+        except (OSError, ZeroDivisionError) as _ze:
+            result['zhitai_mounted'] = False
+            result['zhitai_pct'] = None
+            result['zhitai_error'] = 'unavailable: ' + type(_ze).__name__
+
         # 系统负载
         r = subprocess.run(['/usr/bin/uptime'], capture_output=True, text=True, timeout=5)
         m = _re.search(r'load averages?: ([\d.]+)\s+([\d.]+)\s+([\d.]+)', r.stdout)
@@ -866,7 +897,8 @@ LAUNCH_PURPOSE = {
     'ai.hermes.gateway': 'AI基础设施 · Hermes 知识映射 Gateway',
     'ai.hermes.watchdog': 'AI基础设施 · Hermes 看门狗（30min 双信号自愈（进程+心跳+TG状态）+ TG 汇报）',
     'ai.hermes.cleanup-locks': 'AI基础设施 · Hermes 开机锁文件清理（防 PID 复用导致误锁）',
-    'com.openclaw.token-dashboard': '运维 · Token看板 HTTP服务 (18888)',
+    'ai.openclaw.heima-site': '聚光萤 · 看板静态站点 HTTP 服务 (18890，serve_site.py)',
+    'com.openclaw.token-dashboard': '运维 · Token看板 HTTP 服务 (18888，水母主维护)',
     'com.openclaw.cloudflared': '运维 · Cloudflare Tunnel 外网穿透（token-dashboard.crypto-signal.work / quant-dashboard）',
     'com.openclaw.dashboard': '量化看板 · 看板 HTTP服务',
     'com.openclaw.guoxue-bot': '国学运势 · Telegram Bot 服务',
@@ -875,6 +907,11 @@ LAUNCH_PURPOSE = {
     'com.openclaw.onchain-dashboard': '量化看板 · 链上数据看板服务',
     'com.openclaw.joke-detector': 'AI实验 · 笑力检测仪服务（智谱API检测幽默内容）',
     'com.openclaw.managed-chrome': '虾厂工具 · CDP Chrome 调试浏览器 (18800)',
+    'com.shrimp.zhipu-asr-proxy': '虾厂工具 · 智谱语音转写本地代理服务（zhipu_asr_proxy.py）',
+    'local.jgy-board-daily-digest': '聚光萤 · 每日趋势日报生成器（每 5 分钟检查发布，daily_digest.py）',
+    'local.jgy-board-deep-read': '聚光萤 · 视频/图文深度补证后处理常驻 worker（deep_worker.py）',
+    'local.jgy-board-retention': '聚光萤 · 看板历史数据留存与清理（每小时，retention.py）',
+    'local.jgy-board-trial': '聚光萤 · 线上内测与互动反馈常驻服务（jgy.crypto-signal.work，trial.py）',
     'com.haixing.landing-page': 'AI影视 · 落地页 HTTP服务',
     'io.github.clash-verge-rev.clash-verge-rev': '网络 · Clash Verge 代理工具',
     'netdisk_service': '第三方 · 百度网盘后台服务（非虾厂）',
@@ -1201,22 +1238,21 @@ def _gateway_derived_pids(rows, gateway_pids):
 _TD_DATA_DIR = os.path.join(_PROJECT_DIR, 'data')
 _SYS_TASK_STATE_FILE = os.path.join(_TD_DATA_DIR, 'system_tasks_state.json')
 
-# 已知任务名单（首版）；config.json 的 system_tasks 键可扩展/覆盖（config可扩展）
+# 已知任务名单（现役非Gateway衍生定时脚本与常驻服务）；config.json 的 system_tasks 键可扩展/覆盖
 DEFAULT_SYSTEM_TASKS = [
-    {'name': 'Twitter KOL监控', 'owner': '系统', 'period': '每20/30分钟', 'match': ['collectors.twitter_monitor']},
     {'name': '服务器巡检·健康巡检', 'owner': '基围虾/运维', 'period': '每15分钟', 'match': ['health_check.py']},
     {'name': '服务器巡检·日志轮转', 'owner': '基围虾/运维', 'period': '每小时25分', 'match': ['gateway_log_rotate.sh']},
+    {'name': '服务器巡检·cron投递快照', 'owner': '基围虾/运维', 'period': '每15分钟', 'match': ['cron_delivery_snapshot.py']},
     {'name': '服务器巡检·tmp清理', 'owner': '基围虾/运维', 'period': '每日06:55', 'match': ['clean_workspace_tmp.py']},
-    {'name': '邮件监控', 'owner': '系统', 'period': '每30分钟', 'match': ['email_monitor.py']},
-    # 2026-08-27 移除「Git自动备份」条目：该任务已是 OpenClaw cron（agent_id=jiweixia），
-    # 由 Gateway 派生执行 git_backup.sh；本扫描器按设计边界排除一切 Gateway 派生进程
-    # （见 _gateway_derived_pids 注释），此条目自上线起永远匹配不到，看板恒显「暂无运行记录」。
-    # 其真实运行状态在 /cron 定时任务总览页正常展示（sqlite 实证 8-27 06:28 ok delivered）。
-    # 2026-08-31 登记「国学bot服务」：launchd 常驻服务 com.openclaw.guoxue-bot（KeepAlive），
-    # 每周重启后被 launchd 重新拉起的前 30 分钟会被未识别栏误抓（跑超 30 分钟才被常驻排除规则过滤）。
-    # match 双关键字：中文路径段最精确；bot/bot_server.py 为 ASCII 兜底（全机器唯一，无同名冲突），
-    # 防 ps 输出环境变化导致中文匹配失效。项目目录现为 桐姐玄学项目（原「国学运势顾问V3」仅剩 data 残留）。
-    {'name': '国学bot服务', 'owner': '基围虾/运维', 'period': '常驻（launchd）', 'match': ['桐姐玄学项目/生产-TGBot/bot/bot_server.py', 'bot/bot_server.py']},
+    {'name': '服务器巡检·磁盘du快照', 'owner': '基围虾/运维', 'period': '每日06:55', 'match': ['du_snapshot.py']},
+    {'name': '智泰硬盘全量备份', 'owner': '基围虾/运维', 'period': '每日07:30', 'match': ['openclaw-backup/backup.sh', 'backup.sh']},
+    {'name': '邮件监控', 'owner': 'Token看板', 'period': '每30分钟', 'match': ['email_monitor.py']},
+    {'name': '聚光萤·云端服务监控', 'owner': '聚光萤/运维', 'period': '每30分钟', 'match': ['cloud_monitor.py']},
+    {'name': '聚光萤·站点服务 (18890)', 'owner': '聚光萤', 'period': '常驻（launchd）', 'match': ['聚光萤看板/code/serve_site.py', 'serve_site.py']},
+    {'name': '聚光萤·深度补证 worker', 'owner': '聚光萤', 'period': '常驻（launchd）', 'match': ['聚光萤看板/code/board/deep_worker.py', 'deep_worker.py']},
+    {'name': '聚光萤·线上互动服务', 'owner': '聚光萤', 'period': '常驻（launchd）', 'match': ['聚光萤看板/code/board/trial.py', 'trial.py']},
+    {'name': '智谱语音转写代理', 'owner': '虾厂工具', 'period': '常驻（launchd）', 'match': ['zhipu_asr_proxy.py']},
+    {'name': '国学bot服务', 'owner': '国学运势', 'period': '常驻（launchd）', 'match': ['桐姐玄学项目/生产-TGBot/bot/bot_server.py', 'bot/bot_server.py']},
 ]
 
 def _load_system_task_defs():
@@ -1610,6 +1646,8 @@ def _get_launch_agents():
     patterns = [
         os.path.expanduser('~/Library/LaunchAgents/com.openclaw.*.plist'),
         os.path.expanduser('~/Library/LaunchAgents/com.haixing.*.plist'),
+        os.path.expanduser('~/Library/LaunchAgents/com.shrimp.*.plist'),
+        os.path.expanduser('~/Library/LaunchAgents/local.jgy-*.plist'),
         os.path.expanduser('~/Library/LaunchAgents/ai.*.plist'),
         os.path.expanduser('~/Library/LaunchAgents/io.github.clash-verge-rev.*.plist'),
         os.path.expanduser('~/Library/LaunchAgents/netdisk_service.plist'),
@@ -1655,7 +1693,12 @@ def _get_launch_agents():
             elif info.get('interval'):
                 mins = info['interval'] // 60
                 hours = mins // 60
-                info['runMode'] = f'定时（每{hours}时{mins%60}分）' if hours > 0 else f'定时（每{mins}分）'
+                if hours > 0 and mins % 60 == 0:
+                    info['runMode'] = f'定时（每{hours}小时）'
+                elif hours > 0:
+                    info['runMode'] = f'定时（每{hours}时{mins%60}分）'
+                else:
+                    info['runMode'] = f'定时（每{mins}分）'
             elif info.get('runAtLoad'):
                 info['runMode'] = '开机启动一次'
             else:

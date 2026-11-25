@@ -126,12 +126,15 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertLess(cards_text.index('Codex'), cards_text.index('Antigravity'))
             self.assertTrue(await page.locator('#btnRefreshAntigravity').is_visible())
 
-            # Verify linxia resolves to 磷虾 and XSS did not execute
+            # Verify linxia resolves to 磷虾 and XSS did not execute (cron moved to #page-ops tab)
+            self.assertEqual(await page.locator('#summaryGrid').count(), 0)
+            await page.locator('#pageTabs button[data-page="ops"]').click()
             await page.wait_for_function("document.querySelectorAll('#cronOpenclawBody tr').length >= 1")
             await page.locator('#foldOpenclaw > summary').click()
             cron_text = await page.locator('#cronOpenclawBody').inner_text()
             self.assertIn('磷虾', cron_text)
             self.assertIsNone(await page.evaluate('window.__xss'))
+            await page.locator('#pageTabs button[data-page="monitor"]').click()
 
             # Switch Antigravity mock to full snapshot with buckets + credits + freshness tag
             snap_ts = int(time.time() * 1000) - 180_000

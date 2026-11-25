@@ -1,5 +1,15 @@
 # Token Dashboard 变更日志
 
+## 2026-11-26
+
+- **3 页卡重构、ZHITAI 外置盘监控、邮箱容错与定时/系统任务全量补齐（水母 🪼，经董事长批准执行）**：
+  1. **顶层 3 页卡与移除过时「📊 总览」**：`templates/token_dashboard.html` 顶栏升级为 `📊 运营监控` / `📂 活跃项目` / `⚙️ 运维与任务` 三页卡（支持 `#monitor` / `#projects` / `#ops` Hash 切换及跨页卡角标异常透传）；将「⏱ 定时任务」与「🖥️ 系统任务」迁入 `⚙️ 运维与任务` 独立页卡，并移除信息重复且口径失真的「📊 总览」6 卡片。
+  2. **ZHITAI 外置盘监控**：`token_dashboard_server.py` 的 `_get_system_health()` 新增 `/Volumes/ZHITAI` 挂载与已用比例/剩余空间采集，前端「🩺 系统健康」新增 `ZHITAI 外置盘` 卡片（未挂载直接红字告警）。
+  3. **邮箱状态容错与 15s 自动重试**：`fetchEmailStatus()` 增加登录重定向与 `content-type` 校验；遇重启或网络抖动时保留上次正常数据并在摘要区黄字提示 `⚠️ 暂时失联，15秒后自动重试`，避免瞬间红条误报。
+  4. **定时任务 / 系统任务全量清洗补齐**：补全 OpenClaw 定时任务 4 项启用 + 6 项历史停用空白用途（并清理 `Git自动备份` 过时灰度字样）；补齐 Crontab `prune_session_heads.py` 用途并修正 `backup.sh` 调度时间说明为 `07:30`；`_get_launch_agents()` 补扫 `com.shrimp.*` 与 `local.jgy-*` 5 个缺失 plist 并补全 `ai.openclaw.heima-site` 等全部 20 项 LaunchAgent 用途；`DEFAULT_SYSTEM_TASKS` 移除已停用的 `Twitter KOL监控`，补入 `智泰硬盘全量备份`、`聚光萤`（云端监控/站点/深度补证/线上互动）、`智谱语音转写代理` 等 13 项现役定时与常驻服务。
+  5. **验证**：`py_compile` + `node --check` 通过；`unittest` **49/49** 全部通过（3.086s）；重启服务后实测 `/health-json`、`zhitai_pct=31%`、`/cron-json` 全量启用项/LaunchAgent 零空白用途、`/system-tasks` 13 项正常捕捉 5 个常驻服务；内置浏览器实测 3 页卡切换、总览移除、全部展开表零「未标注」与 18 个 HTTP 200 请求、0 报错。
+  6. **回滚**：`git revert <commit>` 后 `launchctl kickstart -k "gui/$(id -u)/com.openclaw.token-dashboard"`。
+
 ## 2026-11-25
 
 - **活跃项目独立页卡切换 + Antigravity 实时刷新余量（水母 🪼）**：

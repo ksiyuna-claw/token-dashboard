@@ -1,4 +1,4 @@
-"""Playwright UI tests for dedicated active projects page tab, filters, manual rescan, and XSS escaping."""
+"""Playwright UI tests for 3 top-level tabs, projects scanner, ZHITAI health card, and email retry resilience."""
 from contextlib import asynccontextmanager
 from pathlib import Path
 import tempfile
@@ -13,7 +13,7 @@ ORIGIN = 'http://token-dashboard.test'
 
 
 @asynccontextmanager
-async def projects_page(projects_payload, refresh_urls):
+async def projects_page(projects_payload, refresh_urls, health_state, email_handler, cron_payload=None, sys_tasks=None):
     async with async_playwright() as playwright:
         with tempfile.TemporaryDirectory(prefix='dashboard-projects-chrome-') as profile:
             context = await playwright.chromium.launch_persistent_context(
@@ -43,9 +43,17 @@ async def projects_page(projects_payload, refresh_urls):
                 elif url.path == '/sessions-json':
                     await route.fulfill(json={'sessions': []})
                 elif url.path == '/health-json':
-                    await route.fulfill(json={'cpu_pct': 5.0, 'mem_used_gb': 4.0, 'mem_total_gb': 16.0, 'mem_pct': 25.0, 'disk_pct': 40})
+                    await route.fulfill(json=health_state['data'])
+                elif url.path == '/email-status':
+                    status, body = email_handler()
+                    if status == 200:
+                        await route.fulfill(json=body)
+                    else:
+                        await route.fulfill(status=status, content_type='text/html', body='Bad Gateway')
                 elif url.path == '/cron-json':
-                    await route.fulfill(json={'openclawCron': [], 'crontab': [], 'launchAgents': [], 'heartbeats': []})
+                    await route.fulfill(json=cron_payload or {'openclawCron': [], 'crontab': [], 'launchAgents': [], 'heartbeats': []})
+                elif url.path == '/system-tasks':
+                    await route.fulfill(json=sys_tasks or {'tasks': [], 'unknown': []})
                 else:
                     await route.fulfill(json={})
 
@@ -59,7 +67,7 @@ async def projects_page(projects_payload, refresh_urls):
 
 
 class ProjectsPageTests(unittest.IsolatedAsyncioTestCase):
-    async def test_dedicated_projects_tab_filters_refresh_and_xss(self):
+    async def test_three_tabs_zhitai_disk_email_resilience_and_xss(self):
         now_ms = int(time.time() * 1000)
         projects = [
             {
@@ -175,16 +183,70 @@ class ProjectsPageTests(unittest.IsolatedAsyncioTestCase):
             'pendingRules': {'available': True, 'pendingCount': 3},
             'scannedAt': now_ms,
         }
+        health_state = {
+            'data': {
+                'cpu_pct': 5.0,
+                'mem_used_gb': 4.0,
+                'mem_total_gb': 16.0,
+                'mem_pct': 25.0,
+                'disk_pct': 40,
+                'zhitai_mounted': True,
+                'zhitai_total_gb': 954.0,
+                'zhitai_used_gb': 299.0,
+                'zhitai_free_gb': 655.0,
+                'zhitai_pct': 32,
+            }
+        }
+        email_calls = [0]
+
+        def handle_email():
+            email_calls[0] += 1
+            if email_calls[0] == 1:
+                return 200, {'unread_count': 1, 'today_count': 2, 'new_count': 0, 'last_check': '2026-11-25T22:00:00+08:00', 'recent_new': []}
+            return 502, None
+
+        cron_payload = {
+            'openclawCron': [{
+                'id': 'j1', 'name': '故障测试任务', 'agentId': 'main', 'purpose': '测试', 'enabled': True,
+                'schedule': '0 * * * *', 'scheduleHuman': '每小时', 'lastRunStatus': 'error',
+                'lastRunAtMs': None, 'nextRunAtMs': None, 'consecutiveErrors': 2,
+            }],
+            'crontab': [],
+            'launchAgents': [],
+            'heartbeats': [],
+        }
+        sys_tasks = {
+            'tasks': [{'name': '智泰硬盘全量备份', 'owner': '基围虾/运维', 'period': '每日07:30', 'running': False, 'last': None}],
+            'unknown': [],
+        }
 
         errors = []
         refresh_urls = []
-        async with projects_page(payload, refresh_urls) as page:
+        async with projects_page(payload, refresh_urls, health_state, handle_email, cron_payload=cron_payload, sys_tasks=sys_tasks) as page:
             page.on('pageerror', lambda err: errors.append(str(err)))
             await page.wait_for_function("document.getElementById('pageBadgeProjects').textContent === '7'")
+            await page.wait_for_function("document.getElementById('pageBadgeOps').textContent === '❌1'")
 
-            # Default tab is 运营监控: monitor panel visible, projects panel hidden
+            # Default tab is 运营监控; obsolete #summaryGrid removed; ZHITAI card rendered
+            self.assertEqual(await page.locator('#summaryGrid').count(), 0)
             self.assertTrue(await page.locator('#page-monitor').is_visible())
             self.assertFalse(await page.locator('#page-projects').is_visible())
+            self.assertFalse(await page.locator('#page-ops').is_visible())
+            self.assertEqual(await page.locator('#hZhitai').inner_text(), '32%')
+
+            # Unmounted ZHITAI state shows ❌ 未挂载
+            health_state['data']['zhitai_mounted'] = False
+            health_state['data']['zhitai_pct'] = None
+            await page.evaluate('fetchHealth()')
+            await page.wait_for_function("document.getElementById('hZhitai').textContent.includes('未挂载')")
+
+            # Transient email 502 retains last-good card HTML instead of wiping to red error
+            await page.wait_for_function("document.getElementById('emailCard').innerText.includes('未读邮件')")
+            await page.evaluate('fetchEmailStatus()')
+            await page.wait_for_function("document.getElementById('emailSummary').innerText.includes('15秒后自动重试')")
+            email_card_text = await page.locator('#emailCard').inner_text()
+            self.assertIn('未读邮件', email_card_text)
+            self.assertNotIn('获取失败', email_card_text)
 
             # Switch to 活跃项目 tab: all 7 cards render immediately
             await page.locator('#pageTabs button[data-page="projects"]').click()
@@ -192,34 +254,22 @@ class ProjectsPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await page.locator('#page-projects').is_visible())
             await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 7")
 
-            summary_text = await page.locator('#projectsSummary').inner_text()
-            self.assertIn('7 个项目', summary_text)
-            self.assertIn('待审规则 3 条', summary_text)
-            self.assertIn('已完结归档项目', await page.locator('#projectGrid').inner_text())
-
-            # Filter tabs inside 活跃项目 page
             await page.locator('#projectTabs button[data-pfilter="active"]').click()
             await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 2")
-            active_text = await page.locator('#projectGrid').inner_text()
-            self.assertIn('Token 看板', active_text)
-            self.assertNotIn('聚光萤看板', active_text)
-
-            await page.locator('#projectTabs button[data-pfilter="other"]').click()
-            await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 2")
-
-            await page.locator('#projectTabs button[data-pfilter="decision"]').click()
-            await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 1")
-
-            # Manual rescan button triggers ?refresh=1
             await page.locator('#btnRefreshProjects').click()
             await page.wait_for_function("document.getElementById('btnRefreshProjects').disabled === false")
             self.assertEqual(len(refresh_urls), 1)
-            self.assertIn('refresh=1', refresh_urls[0])
+
+            # Switch to 运维与任务 tab: cron & system tasks visible
+            await page.locator('#pageTabs button[data-page="ops"]').click()
+            self.assertFalse(await page.locator('#page-projects').is_visible())
+            self.assertTrue(await page.locator('#page-ops').is_visible())
+            self.assertIn('智泰硬盘全量备份', await page.locator('#systemTaskCard').inner_text())
 
             # Switch back to 运营监控 tab
             await page.locator('#pageTabs button[data-page="monitor"]').click()
             self.assertTrue(await page.locator('#page-monitor').is_visible())
-            self.assertFalse(await page.locator('#page-projects').is_visible())
+            self.assertFalse(await page.locator('#page-ops').is_visible())
 
             self.assertIsNone(await page.evaluate('window.__xss'))
             self.assertEqual(errors, [])

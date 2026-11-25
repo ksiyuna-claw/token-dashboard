@@ -383,6 +383,45 @@ class ServerRoutingAndHealthTests(unittest.TestCase):
         remote.do_POST()
         self.assertEqual(remote_responses, [302])
 
+    def test_system_health_zhitai_mounted_and_unmounted(self):
+        from types import SimpleNamespace
+        fake_ps = subprocess.CompletedProcess(['/bin/ps'], 0, stdout='  100 10.0 1024 python\n', stderr='')
+        fake_vm = subprocess.CompletedProcess(['/usr/bin/vm_stat'], 0, stdout='Pages active: 1000.\nPages free: 1000.\n', stderr='')
+        fake_sw = subprocess.CompletedProcess(['/usr/sbin/sysctl'], 0, stdout='total = 0.00M  used = 0.00M\n', stderr='')
+        fake_up = subprocess.CompletedProcess(['/usr/bin/uptime'], 0, stdout='load averages: 1.10 1.20 1.30\n', stderr='')
+
+        def fake_disk(path):
+            if path == '/Volumes/ZHITAI':
+                return SimpleNamespace(total=954 * 1073741824, used=300 * 1073741824, free=654 * 1073741824)
+            return SimpleNamespace(total=228 * 1073741824, used=150 * 1073741824, free=78 * 1073741824)
+
+        with patch.object(server.subprocess, 'run', side_effect=[fake_ps, fake_vm, fake_sw, fake_up]), \
+             patch.object(server.os.path, 'ismount', side_effect=lambda p: p == '/Volumes/ZHITAI'), \
+             patch.object(server.shutil, 'disk_usage', side_effect=fake_disk):
+            h_mounted = server._get_system_health.__wrapped__() if hasattr(server._get_system_health, '__wrapped__') else server._get_system_health()
+        self.assertTrue(h_mounted['zhitai_mounted'])
+        self.assertEqual(h_mounted['zhitai_pct'], 31)
+        self.assertEqual(h_mounted['zhitai_free_gb'], 654.0)
+
+        with patch.object(server.subprocess, 'run', side_effect=[fake_ps, fake_vm, fake_sw, fake_up]), \
+             patch.object(server.os.path, 'ismount', return_value=False), \
+             patch.object(server.os.path, 'isdir', return_value=False), \
+             patch.object(server.shutil, 'disk_usage', side_effect=fake_disk):
+            h_unmounted = server._get_system_health.__wrapped__() if hasattr(server._get_system_health, '__wrapped__') else server._get_system_health()
+        self.assertFalse(h_unmounted['zhitai_mounted'])
+        self.assertIsNone(h_unmounted['zhitai_pct'])
+
+    def test_cron_and_system_task_metadata_coverage(self):
+        for job in ('人生规划月报', '会话数据每周维护（sessions cleanup）', '巨猫-每周数据回收（皮皮虾）', '聚光萤五平台日采'):
+            self.assertIn(job, server.CRON_PURPOSE)
+        self.assertIn('session_heads', server._crontab_purpose('5 3 * * 0 /usr/bin/python3 .../prune_session_heads.py'))
+        for lbl in ('ai.openclaw.heima-site', 'com.shrimp.zhipu-asr-proxy', 'local.jgy-board-deep-read'):
+            self.assertIn(lbl, server.LAUNCH_PURPOSE)
+        task_names = {t['name'] for t in server.DEFAULT_SYSTEM_TASKS}
+        self.assertNotIn('Twitter KOL监控', task_names)
+        self.assertIn('智泰硬盘全量备份', task_names)
+        self.assertIn('聚光萤·云端服务监控', task_names)
+
 
 if __name__ == '__main__':
     unittest.main()
