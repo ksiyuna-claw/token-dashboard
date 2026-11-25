@@ -259,6 +259,8 @@ def _antigravity_bucket_label(bucket_id, unit):
         family = 'Gemini'
     elif 'claude' in low and 'gpt' in low:
         family = 'Claude / GPT'
+    elif low.startswith('3p'):
+        family = 'Claude/GPT'
     elif 'claude' in low:
         family = 'Claude'
     elif 'gpt' in low:
@@ -318,7 +320,9 @@ def fetch_antigravity(snapshot_path, now_ms=None):
             reset_sec_raw = item.get('reset_in_seconds')
             reset_sec = int(round(float(reset_sec_raw))) if is_finite_number(reset_sec_raw) and reset_sec_raw >= 0 else None
             reset_at_ms = _parse_iso_ms(item.get('reset_time'))
-            if reset_at_ms is None and reset_sec is not None:
+            if reset_at_ms is not None and reset_at_ms <= 0:
+                reset_at_ms = None
+            if reset_at_ms is None and reset_sec is not None and reset_sec > 0:
                 reset_at_ms = updated_at_ms + reset_sec * 1000
             unit = _infer_antigravity_unit(bucket_id, reset_sec)
             disabled = item.get('disabled') if isinstance(item.get('disabled'), bool) else False

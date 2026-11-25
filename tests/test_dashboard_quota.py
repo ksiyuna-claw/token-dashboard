@@ -82,6 +82,16 @@ class DashboardQuotaTests(unittest.TestCase):
                         'reset_in_seconds': 14400,
                         'disabled': True,
                     },
+                    '3p-5h': {
+                        'remaining_fraction': 1.0,
+                        'reset_time': '1970-01-01T00:00:00Z',
+                        'reset_in_seconds': 0,
+                    },
+                    '3p-weekly': {
+                        'remaining_fraction': 1.0,
+                        'reset_time': '1970-01-01T00:00:00Z',
+                        'reset_in_seconds': 0,
+                    },
                     'ai-credits': {
                         'remaining_amount': 42.5,
                     },
@@ -95,8 +105,8 @@ class DashboardQuotaTests(unittest.TestCase):
             self.assertTrue(payload['available'])
             self.assertEqual(payload['planTier'], 'Ultra')
             self.assertEqual(payload['ageSec'], 120)
-            self.assertEqual(len(payload['buckets']), 2)
-            b5h, bwk = payload['buckets']
+            self.assertEqual(len(payload['buckets']), 4)
+            b5h, bwk, tp5h, tpwk = payload['buckets']
             self.assertEqual(b5h['id'], 'gemini-5h')
             self.assertEqual(b5h['unit'], 3)
             self.assertEqual(b5h['usedPercent'], 50.0)
@@ -105,6 +115,10 @@ class DashboardQuotaTests(unittest.TestCase):
             self.assertEqual(bwk['id'], 'gemini-weekly')
             self.assertEqual(bwk['unit'], 6)
             self.assertEqual(bwk['usedPercent'], 12.5)
+            self.assertEqual(tp5h['label'], 'Claude/GPT 5小时窗口')
+            self.assertIsNone(tp5h['resetAtMs'])
+            self.assertEqual(tpwk['label'], 'Claude/GPT 周额度')
+            self.assertIsNone(tpwk['resetAtMs'])
             self.assertEqual(len(payload['credits']), 1)
             self.assertEqual(payload['credits'][0]['remainingAmount'], 42.5)
 

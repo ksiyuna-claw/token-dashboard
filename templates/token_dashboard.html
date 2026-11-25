@@ -672,19 +672,25 @@ async function fetchProviderQuotas() {
         } else if (j.available === true) {
           const sub = 'Google AI 订阅' + (j.planTier ? ' · ' + j.planTier : '');
           const rawBuckets = Array.isArray(j.buckets) ? j.buckets : [];
-          const limits = [];
+          const validBuckets = [];
           let hasDisabled = false;
           for (const b of rawBuckets) {
             if (!b || typeof b.usedPercent !== 'number' || !isFinite(b.usedPercent) || b.usedPercent < 0) continue;
             if (b.disabled === true) hasDisabled = true;
-            limits.push({
-              type: 'TOKENS_LIMIT',
-              label: b.label || b.id || '配额',
-              unit: Number.isFinite(b.unit) ? b.unit : 0,
-              percentage: b.usedPercent,
-              nextResetTime: Number.isFinite(b.resetAtMs) ? b.resetAtMs : null
-            });
+            validBuckets.push(b);
           }
+          const is3pBucket = b => String(b.id || '').toLowerCase().startsWith('3p');
+          const non3pBuckets = validBuckets.filter(b => !is3pBucket(b));
+          const tpBuckets = validBuckets.filter(is3pBucket);
+          const fold3p = non3pBuckets.length > 0 && tpBuckets.length > 0 && tpBuckets.every(b => b.usedPercent === 0 && b.disabled !== true);
+          const displayBuckets = fold3p ? non3pBuckets : validBuckets;
+          const limits = displayBuckets.map(b => ({
+            type: 'TOKENS_LIMIT',
+            label: b.label || b.id || '配额',
+            unit: Number.isFinite(b.unit) ? b.unit : 0,
+            percentage: b.usedPercent,
+            nextResetTime: Number.isFinite(b.resetAtMs) ? b.resetAtMs : null
+          }));
           const ageSec = Number.isFinite(j.ageSec) ? Math.max(0, j.ageSec)
             : (Number.isFinite(j.updatedAt) ? Math.max(0, Math.floor((Date.now() - j.updatedAt) / 1000)) : null);
           let badgeHtml = '';
@@ -703,6 +709,10 @@ async function fetchProviderQuotas() {
             badgeHtml += ' <span class="tag tag-red">额度受限</span>';
           }
           let footerHtml = '';
+          if (fold3p) {
+            const tpTitle = tpBuckets.map(b => (b.label || b.id) + ': ' + b.usedPercent + '% 已用').join(' · ');
+            footerHtml += '<div class="quota-row" title="' + mEsc(tpTitle) + '"><div class="label">Claude/GPT（5h / 周）</div><div style="font-size:12px;color:var(--green)">0% 已用 · 已恢复</div></div>';
+          }
           for (const cr of (Array.isArray(j.credits) ? j.credits : [])) {
             if (cr && typeof cr.remainingAmount === 'number' && isFinite(cr.remainingAmount) && cr.remainingAmount >= 0) {
               const amtText = Number.isInteger(cr.remainingAmount) ? String(cr.remainingAmount) : cr.remainingAmount.toFixed(2);

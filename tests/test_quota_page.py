@@ -134,6 +134,22 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
                         'resetAtMs': int(time.time() * 1000) + 500_000_000,
                         'disabled': False,
                     },
+                    {
+                        'id': '3p-5h',
+                        'label': 'Claude/GPT 5小时窗口',
+                        'unit': 3,
+                        'usedPercent': 0.0,
+                        'resetAtMs': None,
+                        'disabled': False,
+                    },
+                    {
+                        'id': '3p-weekly',
+                        'label': 'Claude/GPT 周额度',
+                        'unit': 6,
+                        'usedPercent': 0.0,
+                        'resetAtMs': None,
+                        'disabled': False,
+                    },
                 ],
                 'credits': [
                     {'id': 'ai-credits', 'label': 'AI Credits 余额', 'remainingAmount': 42}
@@ -147,8 +163,17 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('22.5% 已用', updated_text)
             self.assertIn('Gemini 周额度', updated_text)
             self.assertIn('6.2% 已用', updated_text)
+            self.assertIn('Claude/GPT（5h / 周）', updated_text)
+            self.assertNotIn('Claude/GPT 5小时窗口', updated_text)
             self.assertIn('AI Credits 余额', updated_text)
             self.assertIn('42', updated_text)
+
+            # Once 3p has active consumption (>0%), expand to full progress row
+            quotas['antigravity']['buckets'][2]['usedPercent'] = 15.0
+            await page.evaluate('fetchProviderQuotas()')
+            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('Claude/GPT 5小时窗口')")
+            expanded_text = await page.locator('#providerGrid').inner_text()
+            self.assertIn('15% 已用', expanded_text)
             self.assertIsNone(await page.evaluate('window.__xss'))
             self.assertEqual(errors, [])
 
