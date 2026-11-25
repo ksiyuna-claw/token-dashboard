@@ -14,6 +14,8 @@ from urllib.parse import quote
 QUOTA_CACHE_TTL = 60
 ANTIGRAVITY_REFRESH_COOLDOWN = 15
 ANTIGRAVITY_REFRESH_TIMEOUT = 15
+ANTIGRAVITY_REFRESH_MAX_ATTEMPTS = 3
+ANTIGRAVITY_REFRESH_SETTLE_WAIT = 0.5
 
 _PROXY_HANDLER = urllib.request.ProxyHandler({
     'http': 'http://127.0.0.1:7890',
@@ -376,6 +378,36 @@ def fetch_antigravity(snapshot_path, now_ms=None):
     }
 
 
+def _read_snapshot_stamp(snapshot_path):
+    """Return (updatedAt_ms, mtime_ns) for an Antigravity snapshot file, or Nones."""
+    try:
+        st = os.stat(snapshot_path)
+        mtime_ns = st.st_mtime_ns
+    except OSError:
+        return None, None
+    try:
+        with open(snapshot_path, encoding='utf-8') as f:
+            raw = json.load(f)
+        updated_at = raw.get('updatedAt') if isinstance(raw, dict) else None
+        updated_ms = int(updated_at) if is_finite_number(updated_at) and updated_at > 0 else None
+    except Exception:
+        updated_ms = None
+    return updated_ms, mtime_ns
+
+
+def _snapshot_advanced(before_stamp, after_stamp):
+    """Check whether a snapshot file became freshly populated or newer than before_stamp."""
+    before_ts, before_mtime = before_stamp
+    after_ts, after_mtime = after_stamp
+    if after_ts is None:
+        return False
+    if before_ts is None or after_ts > before_ts:
+        return True
+    if before_mtime is not None and after_mtime is not None and after_mtime > before_mtime:
+        return True
+    return False
+
+
 def refresh_antigravity_snapshot(
     snapshot_path,
     agy_bin=None,
@@ -383,6 +415,9 @@ def refresh_antigravity_snapshot(
     timeout_sec=ANTIGRAVITY_REFRESH_TIMEOUT,
     now_fn=time.time,
     runner=subprocess.run,
+    max_attempts=ANTIGRAVITY_REFRESH_MAX_ATTEMPTS,
+    settle_wait_sec=ANTIGRAVITY_REFRESH_SETTLE_WAIT,
+    sleep_fn=time.sleep,
 ):
     """Trigger official zero-LLM `agy models` so statusLine refreshes local quota snapshot."""
     global _ag_last_refresh_ts
@@ -395,6 +430,7 @@ def refresh_antigravity_snapshot(
             if isinstance(payload, dict):
                 payload = dict(payload)
                 payload['refreshed'] = False
+                payload['snapshotUpdated'] = False
                 payload['throttled'] = True
                 payload['cooldownRemainingSec'] = max(1, int(round(cooldown_sec - (now - _ag_last_refresh_ts))))
             return status, payload
@@ -404,45 +440,82 @@ def refresh_antigravity_snapshot(
             if status == 200 and isinstance(payload, dict):
                 payload = dict(payload)
                 payload['refreshed'] = False
+                payload['snapshotUpdated'] = False
                 payload['refreshError'] = '未找到 agy CLI 可执行文件'
                 return 200, payload
             return 502, {'error': '未找到 agy CLI 可执行文件'}
 
         env = os.environ.copy()
         env.setdefault('HOME', os.path.expanduser('~'))
-        try:
-            proc = runner(
-                [bin_path, 'models'],
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec,
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            status, payload = fetch_antigravity(snapshot_path)
-            if status == 200 and isinstance(payload, dict):
-                payload = dict(payload)
-                payload['refreshed'] = False
-                payload['refreshError'] = f'同步超时（{timeout_sec}s），显示上次快照'
-                return 200, payload
-            return 504, {'error': f'agy models 同步超时（{timeout_sec}s）'}
-        except OSError as exc:
-            status, payload = fetch_antigravity(snapshot_path)
-            if status == 200 and isinstance(payload, dict):
-                payload = dict(payload)
-                payload['refreshed'] = False
-                payload['refreshError'] = f'执行失败: {exc}'
-                return 200, payload
-            return 502, {'error': f'agy models 执行失败: {exc}'}
+        before_stamp = _read_snapshot_stamp(snapshot_path)
+        attempts_used = 0
+        snapshot_updated = False
+        last_rc = 0
+        max_tries = max(1, int(max_attempts))
 
-        _ag_last_refresh_ts = now_fn()
+        for _ in range(max_tries):
+            attempts_used += 1
+            try:
+                proc = runner(
+                    [bin_path, 'models'],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                status, payload = fetch_antigravity(snapshot_path)
+                if status == 200 and isinstance(payload, dict):
+                    payload = dict(payload)
+                    payload['refreshed'] = False
+                    payload['snapshotUpdated'] = False
+                    payload['attempts'] = attempts_used
+                    payload['refreshError'] = f'同步超时（{timeout_sec}s），显示上次快照'
+                    return 200, payload
+                return 504, {'error': f'agy models 同步超时（{timeout_sec}s）'}
+            except OSError as exc:
+                status, payload = fetch_antigravity(snapshot_path)
+                if status == 200 and isinstance(payload, dict):
+                    payload = dict(payload)
+                    payload['refreshed'] = False
+                    payload['snapshotUpdated'] = False
+                    payload['attempts'] = attempts_used
+                    payload['refreshError'] = f'执行失败: {exc}'
+                    return 200, payload
+                return 502, {'error': f'agy models 执行失败: {exc}'}
+
+            last_rc = proc.returncode
+            if proc.returncode != 0:
+                break
+
+            if _snapshot_advanced(before_stamp, _read_snapshot_stamp(snapshot_path)):
+                snapshot_updated = True
+                break
+
+            if settle_wait_sec and settle_wait_sec > 0:
+                steps = 5
+                step_sleep = float(settle_wait_sec) / steps
+                for _ in range(steps):
+                    sleep_fn(step_sleep)
+                    if _snapshot_advanced(before_stamp, _read_snapshot_stamp(snapshot_path)):
+                        snapshot_updated = True
+                        break
+                if snapshot_updated:
+                    break
+
+        if snapshot_updated:
+            _ag_last_refresh_ts = now_fn()
+
         status, payload = fetch_antigravity(snapshot_path)
         if isinstance(payload, dict):
             payload = dict(payload)
-            payload['refreshed'] = (proc.returncode == 0)
+            payload['snapshotUpdated'] = snapshot_updated
+            payload['refreshed'] = snapshot_updated
             payload['throttled'] = False
-            if proc.returncode != 0:
-                payload['refreshError'] = f'agy models 退出码 {proc.returncode}'
+            payload['attempts'] = attempts_used
+            if last_rc != 0:
+                payload['refreshError'] = f'agy models 退出码 {last_rc}'
         return status, payload
 
 

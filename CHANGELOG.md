@@ -2,6 +2,12 @@
 
 ## 2026-11-26
 
+- **修复 Antigravity「🔄 刷新」竞态未写盘却误报成功且锁死冷却（水母 🪼，经董事长批准执行）**：
+  1. **根因**：`~/.gemini/antigravity-cli/log/cli-20261126_001328.log` 实证 `agy models` 会在后台刚发起 `doRefreshQuota` 后 0.8ms 内触发 `Language server shutting down` 退出（`rc=0`）导致 `statusLine` 来不及写盘；旧版 `refresh_antigravity_snapshot()` 只判退出码 `0` 不核对 `updatedAt`，导致界面误报同步成功、锁 15s 冷却却仍显「快照 · 2小时前」。
+  2. **后端真值核验与自动重试**：`dashboard_quota.py` 新增 `_read_snapshot_stamp()` 与 `_snapshot_advanced()`，调用 `agy models`（显式传 `stdin=subprocess.DEVNULL`）前先记旧时间戳，退出后最多短等 `0.5s` 校验是否写盘；若撞上退出竞态未更新，单次点击内自动补跑（最多 3 轮）。返回新增 `snapshotUpdated` / `attempts`；**仅当快照确实推进时才进入 15s 冷却**，未落盘不锁冷却。
+  3. **前端诚实提示**：`templates/token_dashboard.html` 的 `refreshAntigravityQuota()` 在 `snapshotUpdated === false` 时明确黄字提示 `⚠️ agy 退出过快未完成写盘，请再点一次刷新`，不再假报绿色成功。
+  4. **验证**：`py_compile` + `node --check` 通过；`unittest` **50/50** 全部通过（4.431s，含竞态重试/不误锁冷却单测与 Playwright UI 断言）；重启服务（PID `85050`）后 `curl POST /quota/antigravity/refresh`（HTTP 200、`attempts=1`、`ageSec=0`）将陈旧 2 小时快照即时更新；内置浏览器点击 `🔄 刷新` 实测于第 3 轮自动重试命中更新（`attempts=3`、HTTP 200、`64.5%`→`68.5%`、`41.4%`→`43.2%`、`快照 · 刚刚`、`✅ 已实时同步最新余量`），0 报错。
+
 - **3 页卡重构、ZHITAI 外置盘监控、邮箱容错与定时/系统任务全量补齐（水母 🪼，经董事长批准执行）**：
   1. **顶层 3 页卡与移除过时「📊 总览」**：`templates/token_dashboard.html` 顶栏升级为 `📊 运营监控` / `📂 活跃项目` / `⚙️ 运维与任务` 三页卡（支持 `#monitor` / `#projects` / `#ops` Hash 切换及跨页卡角标异常透传）；将「⏱ 定时任务」与「🖥️ 系统任务」迁入 `⚙️ 运维与任务` 独立页卡，并移除信息重复且口径失真的「📊 总览」6 卡片。
   2. **ZHITAI 外置盘监控**：`token_dashboard_server.py` 的 `_get_system_health()` 新增 `/Volumes/ZHITAI` 挂载与已用比例/剩余空间采集，前端「🩺 系统健康」新增 `ZHITAI 外置盘` 卡片（未挂载直接红字告警）。

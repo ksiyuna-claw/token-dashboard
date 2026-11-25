@@ -109,12 +109,20 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
                 quotas['antigravity']['buckets'][0]['usedPercent'] = 33.3
                 out = dict(quotas['antigravity'])
                 out['refreshed'] = True
+                out['snapshotUpdated'] = True
                 out['throttled'] = False
+                return out
+            if len(refresh_calls) == 2:
+                out = dict(quotas['antigravity'])
+                out['refreshed'] = False
+                out['snapshotUpdated'] = False
+                out['throttled'] = True
+                out['cooldownRemainingSec'] = 12
                 return out
             out = dict(quotas['antigravity'])
             out['refreshed'] = False
-            out['throttled'] = True
-            out['cooldownRemainingSec'] = 12
+            out['snapshotUpdated'] = False
+            out['throttled'] = False
             return out
 
         async with quota_page(providers, quotas, cron_payload=cron_payload, refresh_handler=handle_refresh) as page:
@@ -204,7 +212,14 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             # Second immediate click shows cooldown feedback cleanly
             await page.locator('#btnRefreshAntigravity').click()
             await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('12秒冷却')")
-            self.assertEqual(len(refresh_calls), 2)
+
+            # Third click simulates agy shutdown race (snapshotUpdated=false) -> honest warning, never false green success
+            await page.locator('#btnRefreshAntigravity').click()
+            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('agy 退出过快未完成写盘')")
+            stale_text = await page.locator('#providerGrid').inner_text()
+            self.assertIn('⚠️ agy 退出过快未完成写盘，请再点一次刷新', stale_text)
+            self.assertNotIn('已实时同步最新余量', stale_text)
+            self.assertEqual(len(refresh_calls), 3)
 
             # Once 3p has active consumption (>0%), expand to full progress row
             quotas['antigravity']['buckets'][2]['usedPercent'] = 15.0

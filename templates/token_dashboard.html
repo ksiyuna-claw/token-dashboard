@@ -623,6 +623,9 @@ async function refreshAntigravityQuota() {
     } else if (j && j.throttled) {
       if (Number.isFinite(j.updatedAt)) _antigravityUpdatedAt = j.updatedAt;
       feedback = { text: '刚同步过（' + (j.cooldownRemainingSec || 15) + '秒冷却），已显示最新快照', color: 'var(--dim)' };
+    } else if (j && j.snapshotUpdated === false) {
+      if (Number.isFinite(j.updatedAt)) _antigravityUpdatedAt = j.updatedAt;
+      feedback = { text: '⚠️ agy 退出过快未完成写盘，请再点一次刷新', color: 'var(--yellow)' };
     } else if (j && j.available === true) {
       _antigravityUpdatedAt = Number.isFinite(j.updatedAt) ? j.updatedAt : null;
       feedback = { text: '✅ 已实时同步最新余量', color: 'var(--green)' };

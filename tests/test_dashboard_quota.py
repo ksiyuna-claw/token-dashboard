@@ -179,10 +179,12 @@ class DashboardQuotaTests(unittest.TestCase):
             }), encoding='utf-8')
 
             calls = []
+            seen_stdins = []
             clock = [1000.0]
 
             def fake_runner(cmd, **kwargs):
                 calls.append(cmd)
+                seen_stdins.append(kwargs.get('stdin'))
                 snap.write_text(json.dumps({
                     'updatedAt': 1_700_000_050_000,
                     'source': 'antigravity-cli-statusline',
@@ -197,13 +199,18 @@ class DashboardQuotaTests(unittest.TestCase):
                     cooldown_sec=15,
                     now_fn=lambda: clock[0],
                     runner=fake_runner,
+                    settle_wait_sec=0,
+                    sleep_fn=lambda _: None,
                 )
                 self.assertEqual(status, 200)
                 self.assertTrue(payload['refreshed'])
+                self.assertTrue(payload['snapshotUpdated'])
+                self.assertEqual(payload['attempts'], 1)
                 self.assertFalse(payload['throttled'])
                 self.assertEqual(payload['buckets'][0]['usedPercent'], 40.0)
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0], [str(fake_bin), 'models'])
+                self.assertEqual(seen_stdins, [subprocess.DEVNULL])
 
                 # Immediate repeat inside cooldown window should NOT spawn agy again
                 clock[0] = 1005.0
@@ -213,9 +220,12 @@ class DashboardQuotaTests(unittest.TestCase):
                     cooldown_sec=15,
                     now_fn=lambda: clock[0],
                     runner=fake_runner,
+                    settle_wait_sec=0,
+                    sleep_fn=lambda _: None,
                 )
                 self.assertEqual(status2, 200)
                 self.assertFalse(payload2['refreshed'])
+                self.assertFalse(payload2['snapshotUpdated'])
                 self.assertTrue(payload2['throttled'])
                 self.assertEqual(payload2['cooldownRemainingSec'], 10)
                 self.assertEqual(len(calls), 1)
@@ -231,11 +241,116 @@ class DashboardQuotaTests(unittest.TestCase):
                     cooldown_sec=15,
                     now_fn=lambda: clock[0],
                     runner=timeout_runner,
+                    settle_wait_sec=0,
+                    sleep_fn=lambda _: None,
                 )
                 self.assertEqual(status3, 200)
                 self.assertFalse(payload3['refreshed'])
+                self.assertFalse(payload3['snapshotUpdated'])
                 self.assertIn('超时', payload3['refreshError'])
                 self.assertEqual(payload3['buckets'][0]['usedPercent'], 40.0)
+
+    def test_refresh_antigravity_retries_on_shutdown_race_and_skips_cooldown_when_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = Path(tmp) / 'antigravity_quota.json'
+            fake_bin = Path(tmp) / 'agy'
+            fake_bin.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            fake_bin.chmod(0o755)
+            snap.write_text(json.dumps({
+                'updatedAt': 1_700_000_000_000,
+                'source': 'antigravity-cli-statusline',
+                'quota': {'gemini-5h': {'remaining_fraction': 0.8}},
+            }), encoding='utf-8')
+
+            # Case 1: 1st attempt loses shutdown race (no write), 2nd attempt succeeds
+            attempts_case1 = []
+            clock = [2000.0]
+
+            def retry_then_write_runner(cmd, **kwargs):
+                attempts_case1.append(1)
+                if len(attempts_case1) == 2:
+                    snap.write_text(json.dumps({
+                        'updatedAt': 1_700_000_090_000,
+                        'source': 'antigravity-cli-statusline',
+                        'quota': {'gemini-5h': {'remaining_fraction': 0.5}},
+                    }), encoding='utf-8')
+                return subprocess.CompletedProcess(cmd, 0, stdout='ok', stderr='')
+
+            with patch.object(dq, '_ag_last_refresh_ts', 0.0):
+                st1, pl1 = dq.refresh_antigravity_snapshot(
+                    str(snap),
+                    agy_bin=str(fake_bin),
+                    cooldown_sec=15,
+                    now_fn=lambda: clock[0],
+                    runner=retry_then_write_runner,
+                    max_attempts=3,
+                    settle_wait_sec=0,
+                    sleep_fn=lambda _: None,
+                )
+                self.assertEqual(st1, 200)
+                self.assertTrue(pl1['snapshotUpdated'])
+                self.assertTrue(pl1['refreshed'])
+                self.assertEqual(pl1['attempts'], 2)
+                self.assertEqual(pl1['buckets'][0]['usedPercent'], 50.0)
+
+                # Cooldown MUST now be active after successful update
+                clock[0] = 2003.0
+                st_cd, pl_cd = dq.refresh_antigravity_snapshot(
+                    str(snap),
+                    agy_bin=str(fake_bin),
+                    cooldown_sec=15,
+                    now_fn=lambda: clock[0],
+                    runner=retry_then_write_runner,
+                    max_attempts=3,
+                    settle_wait_sec=0,
+                    sleep_fn=lambda _: None,
+                )
+                self.assertEqual(st_cd, 200)
+                self.assertTrue(pl_cd['throttled'])
+                self.assertFalse(pl_cd['snapshotUpdated'])
+                self.assertEqual(len(attempts_case1), 2)
+
+            # Case 2: All 3 attempts exit 0 without updating snapshot -> no cooldown lock!
+            attempts_case2 = []
+
+            def noop_runner(cmd, **kwargs):
+                attempts_case2.append(1)
+                return subprocess.CompletedProcess(cmd, 0, stdout='ok', stderr='')
+
+            with patch.object(dq, '_ag_last_refresh_ts', 0.0):
+                clock[0] = 3000.0
+                st2, pl2 = dq.refresh_antigravity_snapshot(
+                    str(snap),
+                    agy_bin=str(fake_bin),
+                    cooldown_sec=15,
+                    now_fn=lambda: clock[0],
+                    runner=noop_runner,
+                    max_attempts=3,
+                    settle_wait_sec=0,
+                    sleep_fn=lambda _: None,
+                )
+                self.assertEqual(st2, 200)
+                self.assertFalse(pl2['snapshotUpdated'])
+                self.assertFalse(pl2['refreshed'])
+                self.assertFalse(pl2['throttled'])
+                self.assertEqual(pl2['attempts'], 3)
+
+                # Immediate follow-up click MUST NOT be throttled since snapshot remained stale
+                clock[0] = 3001.0
+                st3, pl3 = dq.refresh_antigravity_snapshot(
+                    str(snap),
+                    agy_bin=str(fake_bin),
+                    cooldown_sec=15,
+                    now_fn=lambda: clock[0],
+                    runner=noop_runner,
+                    max_attempts=3,
+                    settle_wait_sec=0,
+                    sleep_fn=lambda _: None,
+                )
+                self.assertEqual(st3, 200)
+                self.assertFalse(pl3['throttled'])
+                self.assertFalse(pl3['snapshotUpdated'])
+                self.assertEqual(len(attempts_case2), 6)
 
     def test_codex_valid_pct_contract(self):
         for valid in (0, 0.0, 14, 99.5, 100):
