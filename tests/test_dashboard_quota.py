@@ -228,8 +228,23 @@ class StatuslineWriterTests(unittest.TestCase):
             self.assertEqual(proc3.returncode, 0)
             self.assertEqual(proc3.stdout, '')
 
+    def test_default_snapshot_path_points_to_zhitai_data_dir(self):
+        mod = _load_statusline_module()
+        self.assertEqual(
+            mod.DEFAULT_SNAPSHOT_PATH,
+            '/Volumes/ZHITAI/codex_project/token-dashboard/data/antigravity_quota.json',
+        )
+
 
 class ServerRoutingAndHealthTests(unittest.TestCase):
+    def test_td_data_dir_resolves_from_project_dir(self):
+        expected_data_dir = os.path.join(server._PROJECT_DIR, 'data')
+        self.assertEqual(server._TD_DATA_DIR, expected_data_dir)
+        self.assertEqual(
+            server._SYS_TASK_STATE_FILE,
+            os.path.join(expected_data_dir, 'system_tasks_state.json'),
+        )
+
     def test_hermes_health_uses_ps_snapshot_instead_of_extra_ps_call(self):
         fake_rows = [(4321, 1, 5400, 12345, 'python -m hermes_cli.main gateway')]
         with patch.object(server, '_ps_snapshot', return_value=fake_rows), \

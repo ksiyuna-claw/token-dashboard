@@ -11,3 +11,6 @@ email_monitor.py
 *.bak
 *.bak.*
 task_state_*.json
+TMP/
+ops/handover_*/
+新对话引导词-*.txt

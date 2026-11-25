@@ -2,6 +2,17 @@
 
 ## 2026-11-25
 
+- **生产运行目录迁移至 `/Volumes/ZHITAI/codex_project/token-dashboard/` 并交接水母 🪼 主维护（经董事长批准执行）**：
+  1. **4 处生产路径切换**：
+     - `~/Library/LaunchAgents/com.openclaw.token-dashboard.plist` 的 `WorkingDirectory` 切换至 `/Volumes/ZHITAI/codex_project/token-dashboard`（服务标签 `com.openclaw.token-dashboard`、端口 `18888`、日志目录 `~/.openclaw/logs/token-dashboard/` 与跨项目密码源 `_AUTH_ENV_PATH` 均保持不变）；
+     - 系统 `crontab` 每 30 分钟邮件监听任务切换至 `/Volumes/ZHITAI/codex_project/token-dashboard/email_monitor.py`；
+     - `~/.gemini/antigravity-cli/quota_snapshot_statusline.py` 的 `DEFAULT_SNAPSHOT_PATH` 切换至 `/Volumes/ZHITAI/codex_project/token-dashboard/data/antigravity_quota.json`；
+     - `token_dashboard_server.py` 的 `_TD_DATA_DIR` 改为 `os.path.join(_PROJECT_DIR, 'data')`，并补单测校验动态数据目录与快照路径。
+  2. **实时数据与安全兜底**：停服后增量覆盖同步 `data/` 下 4 份状态文件（`email_state.json`、`email_status.json`、`antigravity_quota.json`、`system_tasks_state.json`）至新目录；`.gitignore` 补充 `TMP/`、`ops/handover_*/`、`新对话引导词-*.txt`（确保密钥 `config.json`、`email_monitor.py`、`data/` 与交接原始回执不入库）。
+  3. **文档双同步与旧目录停用**：同步更新 `README.md`、`CHANGELOG.md`、`Token看板系统运维_SOP.md`、`workspace-jiweixia/AGENTS.md`、`ai_workspace/scripts/README.md` 与 `项目状态.md`；旧目录已安全移入 `~/.Trash/token-dashboard-retired-20261125`。
+  4. **验证**：`py_compile` + `unittest` 39/39 全量通过；`lsof` 确认进程 `cwd` 已切换至 `/Volumes/ZHITAI/codex_project/token-dashboard`；本机 `:18888` 全端点、内置浏览器 7 区块实测（0 报错）及公网 `https://token-dashboard.crypto-signal.work/login`（HTTP 200）在旧目录移入废纸篓前后均验证通过。
+  5. **回滚**：从 `~/.Trash/token-dashboard-retired-20261125` 还原旧目录并恢复 `plist` / `crontab` / `quota_snapshot_statusline.py` 路径后 `launchctl bootout` + `bootstrap`。
+
 - **新增 Antigravity 套餐消耗卡片 + 代码优化重构（水母 🪼，经董事长批准执行）**：
   1. **Antigravity 套餐接入（合规松耦合方案）**：配置官方 Antigravity CLI `statusLine` 脱敏快照脚本 `~/.gemini/antigravity-cli/quota_snapshot_statusline.py`（于 `~/.gemini/antigravity-cli/settings.json` 启用 `stack_with_default: true`），在 `agy` 运行时原子写入 `data/antigravity_quota.json`（剥离邮箱/路径等 PII，空 quota 不覆写旧有效快照）；看板后端新增纯只读适配器，绝不读取 Google OAuth、绝不调用 `agy`、绝不探测内部端口。前端紧挨 Codex 排第 2 位，复用 `renderQuotaCard()` 展示各配额桶已用比例/倒计时/AI Credits 余额及快照新鲜度标签（若尚无快照则提示打开一次 `agy` 自动同步）。
   2. **模块化重构**：将原 `token_dashboard_server.py` 中 5 套重复的额度代理与 60s 缓存兜底逻辑抽离至独立模块 `dashboard_quota.py`（含通用 `QuotaCache`、`get_providers()`、`fetch_quota()`），`config.json` 合并为单次读取；保留 `token_dashboard_server.py` 原有模块级别名兼容；未触碰员工工作状态三件套（`dashboard_activity.py` / `dashboard_background.py` / `dashboard_status.py`）。

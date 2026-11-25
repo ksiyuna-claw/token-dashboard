@@ -1191,7 +1191,7 @@ def _gateway_derived_pids(rows, gateway_pids):
 # ── 系统任务栏（2026-08-20）：非Gateway衍生的定时任务进程可见性，仅看板网页可见，不进TG推送 ──
 # 语义边界：虾卡片 = LLM turn + Gateway衍生exec（token相关）；系统任务栏 = 机器上的
 # cron/launchd 活动（零token）；token统计不变。
-_TD_DATA_DIR = os.path.join(os.path.expanduser('~'), '.openclaw/workspace/ai_workspace/projects/token-dashboard', 'data')
+_TD_DATA_DIR = os.path.join(_PROJECT_DIR, 'data')
 _SYS_TASK_STATE_FILE = os.path.join(_TD_DATA_DIR, 'system_tasks_state.json')
 
 # 已知任务名单（首版）；config.json 的 system_tasks 键可扩展/覆盖（config可扩展）

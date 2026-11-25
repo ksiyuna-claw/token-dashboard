@@ -14,6 +14,9 @@
 
 **一句话定位**：OpenClaw全厂多Agent的用量与自动化监控面板——token消耗、供应商额度、邮箱、系统健康、全部定时任务，一个页面看全。
 
+- **现役生产目录**：`/Volumes/ZHITAI/codex_project/token-dashboard/`（2026-11-25 自 `~/.openclaw/workspace/ai_workspace/projects/token-dashboard/` 迁入）
+- **维护权属**：**水母 🪼**（Antigravity 侧）牵头主维护与交付；OpenClaw 侧（罗氏虾 / 基围虾）转为只读使用与外围巡检协作方。
+
 ## 访问入口
 
 | 入口 | 地址 | 说明 |
