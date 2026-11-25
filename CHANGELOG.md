@@ -1,5 +1,20 @@
 # Token Dashboard 变更日志
 
+## 2026-11-25
+
+- **新增 Antigravity 套餐消耗卡片 + 代码优化重构（水母 🪼，经董事长批准执行）**：
+  1. **Antigravity 套餐接入（合规松耦合方案）**：配置官方 Antigravity CLI `statusLine` 脱敏快照脚本 `~/.gemini/antigravity-cli/quota_snapshot_statusline.py`（于 `~/.gemini/antigravity-cli/settings.json` 启用 `stack_with_default: true`），在 `agy` 运行时原子写入 `data/antigravity_quota.json`（剥离邮箱/路径等 PII，空 quota 不覆写旧有效快照）；看板后端新增纯只读适配器，绝不读取 Google OAuth、绝不调用 `agy`、绝不探测内部端口。前端紧挨 Codex 排第 2 位，复用 `renderQuotaCard()` 展示各配额桶已用比例/倒计时/AI Credits 余额及快照新鲜度标签（若尚无快照则提示打开一次 `agy` 自动同步）。
+  2. **模块化重构**：将原 `token_dashboard_server.py` 中 5 套重复的额度代理与 60s 缓存兜底逻辑抽离至独立模块 `dashboard_quota.py`（含通用 `QuotaCache`、`get_providers()`、`fetch_quota()`），`config.json` 合并为单次读取；保留 `token_dashboard_server.py` 原有模块级别名兼容；未触碰员工工作状态三件套（`dashboard_activity.py` / `dashboard_background.py` / `dashboard_status.py`）。
+  3. **缺陷与安全修复**：
+     - 补全前端 `:root` 缺失的 `--fg` / `--orange` CSS 变量；
+     - 移除重复分叉且漏掉 `linxia`（磷虾）的 `AGENT_CRON_NAMES`，统一复用 `AGENT_NAMES`；
+     - 清理 `_get_openclaw_cron()` 重复的 `@cached(60)` 装饰器及 `/email-status` 死赋值；
+     - `_hermes_health()` 复用 `_ps_snapshot()`，`_get_system_health()` 合并两次 `ps` 为单次调用；
+     - `do_GET`/`do_POST` 使用 `urlsplit` 剥离 query string，JSON 端点统一收口到带 `Content-Length` 与 `BrokenPipeError` 保护的 `_send_json()`；
+     - 补齐 `renderQuotaCard` / `renderNoQuota` / 定时任务 / 健康告警 / 邮箱与系统任务报错处的 `mEsc()` HTML 转义与进度条 `0~100%` 限幅。
+  4. **验证**：`py_compile` + `node --check` 通过；`unittest` 37/37 全部通过（含原有 27 项员工状态回归 + 新增 10 项配额/路由/Playwright 前端测试）；重启 `com.openclaw.token-dashboard` 后本机 `/providers`（8 卡）、`/quota/antigravity`、`/quota/codex`、`/agent-status`、`/health-json`、`/system-tasks?t=1`、公网 `/login`（HTTP 200）及内置浏览器实看全部正常、控制台零报错。
+  5. **回滚**：执行 `git revert <commit>`（并按需禁用 `~/.gemini/antigravity-cli/settings.json` 中的 `statusLine`）后 `launchctl kickstart -k "gui/$(id -u)/com.openclaw.token-dashboard"`。
+
 ## 2026-11-24
 
 员工工作状态改为核对网关活动名单、本人或分身的后台程序，以及原单的审核或云端记录。原来的时间窗口会漏掉长任务，也会把已结束的工作点亮。[设计及代码入口](docs/decisions/0007-员工工作状态.md) · [验证、正式服务与还原位置](</Volumes/ZHITAI/codex_project/八爪鱼总裁办公室/Token看板工作状态维修-20261124/验收.md>)。

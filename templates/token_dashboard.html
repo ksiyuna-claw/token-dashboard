@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>🦐 虾厂 Token 看板</title>
 <style>
-  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --dim: #8b949e; --green: #3fb950; --yellow: #d29922; --red: #f85149; --blue: #58a6ff; --purple: #bc8cff; }
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --fg: #e6edf3; --dim: #8b949e; --green: #3fb950; --yellow: #d29922; --orange: #f0883e; --red: #f85149; --blue: #58a6ff; --purple: #bc8cff; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 20px; max-width: 1100px; margin: 0 auto; }
   .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 8px; }
@@ -426,30 +426,31 @@ function renderModelArea(stat) {
   return `<div class="ac-model"><div class="ac-model-chips">${chips}${staleBadge}</div>${bar}</div>`;
 }
 
-function renderQuotaCard(name, subtitle, limits, level) {
-  const isOverseas = false; // 2026-08-07 海外智谱Coding Plan到期下线
+function renderQuotaCard(name, subtitle, limits, opts) {
+  const badgeHtml = (opts && typeof opts === 'object' && opts.badgeHtml) ? String(opts.badgeHtml) : '';
+  const footerHtml = (opts && typeof opts === 'object' && opts.footerHtml) ? String(opts.footerHtml) : '';
   let rows = '';
-  for (const l of limits) {
+  for (const l of (limits || [])) {
     if (l.type === 'TIME_LIMIT') continue;
     if (l.type === 'TOKENS_LIMIT') {
       const c = quotaColor(l.percentage, l.nextResetTime, l.unit);
       const tag = quotaTag(l.percentage, l.nextResetTime, l.unit);
-      const label = l.unit === 3 ? '5小时窗口' : l.unit === 6 ? '周额度' : 'Token';
+      const label = l.label ? mEsc(l.label) : (l.unit === 3 ? '5小时窗口' : l.unit === 6 ? '周额度' : l.unit === 5 ? '日额度' : 'Token');
+      const barWidth = Math.min(Math.max(Number(l.percentage) || 0, 0), 100);
       rows += `<div class="quota-row">
-        <div class="main-col"><div class="label">${label}</div><div class="sub">${l.percentage}% 已用</div>
-          <div class="progress-bar"><div class="fill" style="width:${l.percentage}%;background:${c}"></div></div>
-          <div class="countdown">${l.percentage===0&&!l.nextResetTime?'✅ 已恢复':`🔄 ${l.percentage}%已用${timeProgress(l.nextResetTime, l.unit)}，${countdown(l.nextResetTime)} 恢复`}</div>
+        <div class="main-col"><div class="label">${label}</div><div class="sub">${mEsc(l.percentage)}% 已用</div>
+          <div class="progress-bar"><div class="fill" style="width:${barWidth}%;background:${c}"></div></div>
+          <div class="countdown">${l.percentage===0&&!l.nextResetTime?'✅ 已恢复':`🔄 ${mEsc(l.percentage)}%已用${timeProgress(l.nextResetTime, l.unit)}，${countdown(l.nextResetTime)} 恢复`}</div>
         </div>
         <div style="text-align:right">${tag}</div>
       </div>`;
     }
   }
-  return rows ? `<div class="card${isOverseas ? ' card-overseas' : ''}"><div class="provider-name">${name}${isOverseas ? ' <span class="overseas-badge">🌐</span>' : ''}</div><div class="provider-sub">${subtitle}</div>${rows}</div>` : '';
+  return (rows || footerHtml) ? `<div class="card"><div class="provider-name">${mEsc(name)}</div><div class="provider-sub">${mEsc(subtitle)}${badgeHtml}</div>${rows}${footerHtml}</div>` : '';
 }
 
 function renderNoQuota(name, subtitle, note) {
-  const isOverseas = false; // 2026-08-07 海外智谱Coding Plan到期下线
-  return `<div class="card${isOverseas ? ' card-overseas' : ''}"><div class="provider-name">${name}${isOverseas ? ' <span class="overseas-badge">🌐</span>' : ''}</div><div class="provider-sub">${subtitle}</div><div class="no-quota">${note}</div></div>`;
+  return `<div class="card"><div class="provider-name">${mEsc(name)}</div><div class="provider-sub">${mEsc(subtitle)}</div><div class="no-quota">${mEsc(note)}</div></div>`;
 }
 
 let _quotaRetryTimer = null;  // P0(2026-10-22): 额度板块失败后的30秒快速重试定时器
@@ -490,10 +491,10 @@ async function fetchProviderQuotas() {
       }
       const j = res.value.data;
       if (j && j.error) quotaAnyFailed = true;  // Y1: fulfilled但返回error也触发重试
-      const host = p.baseUrl.split('//')[1].split('/')[0];
+      const host = (p.baseUrl.split('//')[1] || '').split('/')[0] || '';
       if (p.quotaType === 'zhipu_quota') {
         if (j.code === 200) {
-          cards.push(renderQuotaCard(p.label, host + ' · ' + (j.data.level||'').toUpperCase() + ' 档', j.data.limits, j.data.level));
+          cards.push(renderQuotaCard(p.label, host + ' · ' + (j.data.level||'').toUpperCase() + ' 档', j.data.limits));
         } else if (j.error) {
           cards.push(renderNoQuota(p.label, host, '代理错误: '+j.error));
         } else {
@@ -505,8 +506,8 @@ async function fetchProviderQuotas() {
           if (info) {
             const total = parseFloat(info.total_balance || 0).toFixed(2);
             const availTag = j.is_available ? '<span class="tag tag-green">可用</span>' : '<span class="tag tag-red">不可用</span>';
-            cards.push('<div class="card"><div class="provider-name">' + p.label + '</div><div class="provider-sub">' + host + ' · 按量付费</div>' +
-              '<div class="quota-row"><div><div class="label">余额（' + (info.currency || 'CNY') + '）</div></div><div class="value" style="color:var(--green)">¥' + total + '</div></div>' +
+            cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费</div>' +
+              '<div class="quota-row"><div><div class="label">余额（' + mEsc(info.currency || 'CNY') + '）</div></div><div class="value" style="color:var(--green)">¥' + mEsc(total) + '</div></div>' +
               '<div class="quota-row" style="border:none"><div></div>' + availTag + '</div></div>');
           } else {
             cards.push(renderNoQuota(p.label, host, '无余额信息'));
@@ -516,35 +517,16 @@ async function fetchProviderQuotas() {
         } else {
           cards.push(renderNoQuota(p.label, host, '返回格式异常'));
         }
-      /* 2026-07-23 MiniMax套餐到期下线，代码保留备用
-      } else if (p.quotaType === 'minimax_quota') {
-        if (j.base_resp && j.base_resp.status_code === 0 && Array.isArray(j.model_remains)) {
-          const gen = j.model_remains.find(m => m.model_name === 'general') || j.model_remains[0];
-          if (gen) {
-            const limits = [
-              {type:'TOKENS_LIMIT', unit:3, percentage: Math.max(0, 100 - (gen.current_interval_remaining_percent||0)), nextResetTime: gen.end_time},
-              {type:'TOKENS_LIMIT', unit:6, percentage: Math.max(0, 100 - (gen.current_weekly_remaining_percent||0)), nextResetTime: gen.weekly_end_time},
-            ];
-            cards.push(renderQuotaCard(p.label, host + ' · 编程套餐', limits));
-          } else {
-            cards.push(renderNoQuota(p.label, host, '无套餐数据'));
-          }
-        } else if (j.error) {
-          cards.push(renderNoQuota(p.label, host, '代理错误: ' + j.error));
-        } else {
-          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
-        }
-      */
       } else if (p.quotaType === 'kimi_balance') {
         if (j.code === 0 && j.data) {
           const avail = parseFloat(j.data.available_balance || 0).toFixed(2);
           const cash = parseFloat(j.data.cash_balance || 0).toFixed(2);
           const voucher = parseFloat(j.data.voucher_balance || 0).toFixed(2);
           const availTag = parseFloat(avail) > 0 ? '<span class="tag tag-green">可用</span>' : '<span class="tag tag-red">欠费</span>';
-          cards.push('<div class="card"><div class="provider-name">' + p.label + '</div><div class="provider-sub">' + host + ' · 按量付费</div>' +
-            '<div class="quota-row"><div><div class="label">可用余额（CNY）</div></div><div class="value" style="color:var(--green)">¥' + avail + '</div></div>' +
-            '<div class="quota-row"><div><div class="label">现金余额</div></div><div class="value">¥' + cash + '</div></div>' +
-            '<div class="quota-row" style="border:none"><div><div class="label">代金券余额</div></div><div class="value">¥' + voucher + '</div></div>' +
+          cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费</div>' +
+            '<div class="quota-row"><div><div class="label">可用余额（CNY）</div></div><div class="value" style="color:var(--green)">¥' + mEsc(avail) + '</div></div>' +
+            '<div class="quota-row"><div><div class="label">现金余额</div></div><div class="value">¥' + mEsc(cash) + '</div></div>' +
+            '<div class="quota-row" style="border:none"><div><div class="label">代金券余额</div></div><div class="value">¥' + mEsc(voucher) + '</div></div>' +
             '<div class="quota-row" style="border:none"><div></div>' + availTag + '</div></div>');
         } else if (j.error) {
           cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
@@ -611,7 +593,7 @@ async function fetchProviderQuotas() {
             podHtml +
             '<div class="quota-row" style="border:none"><div></div>' + podTag + '</div></div>');
         } else if (j.error) {
-          cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
         } else {
           cards.push(renderNoQuota(p.label, host, 'API返回异常'));
         }
@@ -632,7 +614,7 @@ async function fetchProviderQuotas() {
               '<div class="quota-row" style="border:none"><div></div>' + acctTag + '</div></div>');
           }
         } else if (j.error) {
-          cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
         } else {
           cards.push(renderNoQuota(p.label, host, 'API返回异常'));
         }
@@ -650,7 +632,7 @@ async function fetchProviderQuotas() {
               rows + '</div>');
           }
         } else if (j.error) {
-          cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
         } else {
           cards.push(renderNoQuota(p.label, host, 'API返回异常'));
         }
@@ -675,10 +657,63 @@ async function fetchProviderQuotas() {
             const limits = [pLimit];
             const sLimit = j.secondaryWindow ? toLimit(j.secondaryWindow) : null;
             if (sLimit != null) limits.push(sLimit);
-            cards.push(renderQuotaCard(p.label, 'ChatGPT 订阅 · ' + mEsc(planName) + restrictedTag, limits));
+            cards.push(renderQuotaCard(p.label, 'ChatGPT 订阅 · ' + planName, limits, { badgeHtml: restrictedTag }));
           }
         } else if (j.error) {
-          cards.push(renderNoQuota(p.label, host, '获取失败: ' + mEsc(j.error)));
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
+        } else {
+          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+        }
+      } else if (p.quotaType === 'antigravity_quota') {
+        if (j.error) {
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
+        } else if (j.available === false) {
+          cards.push(renderNoQuota(p.label, 'Google AI 订阅 · 本地快照', j.hint || '暂无快照 · 在终端打开一次 agy 自动同步'));
+        } else if (j.available === true) {
+          const sub = 'Google AI 订阅' + (j.planTier ? ' · ' + j.planTier : '');
+          const rawBuckets = Array.isArray(j.buckets) ? j.buckets : [];
+          const limits = [];
+          let hasDisabled = false;
+          for (const b of rawBuckets) {
+            if (!b || typeof b.usedPercent !== 'number' || !isFinite(b.usedPercent) || b.usedPercent < 0) continue;
+            if (b.disabled === true) hasDisabled = true;
+            limits.push({
+              type: 'TOKENS_LIMIT',
+              label: b.label || b.id || '配额',
+              unit: Number.isFinite(b.unit) ? b.unit : 0,
+              percentage: b.usedPercent,
+              nextResetTime: Number.isFinite(b.resetAtMs) ? b.resetAtMs : null
+            });
+          }
+          const ageSec = Number.isFinite(j.ageSec) ? Math.max(0, j.ageSec)
+            : (Number.isFinite(j.updatedAt) ? Math.max(0, Math.floor((Date.now() - j.updatedAt) / 1000)) : null);
+          let badgeHtml = '';
+          if (ageSec != null) {
+            if (ageSec < 60) {
+              badgeHtml = ' <span class="tag tag-green">快照 · 刚刚</span>';
+            } else if (ageSec < 3600) {
+              badgeHtml = ' <span class="tag tag-blue">快照 · ' + Math.floor(ageSec / 60) + '分钟前</span>';
+            } else if (ageSec < 86400) {
+              badgeHtml = ' <span class="tag tag-yellow">快照 · ' + Math.floor(ageSec / 3600) + '小时前</span>';
+            } else {
+              badgeHtml = ' <span class="tag tag-yellow" title="在终端运行一次 agy 即可自动刷新快照">快照 · ' + Math.floor(ageSec / 86400) + '天前（开 agy 刷新）</span>';
+            }
+          }
+          if (hasDisabled) {
+            badgeHtml += ' <span class="tag tag-red">额度受限</span>';
+          }
+          let footerHtml = '';
+          for (const cr of (Array.isArray(j.credits) ? j.credits : [])) {
+            if (cr && typeof cr.remainingAmount === 'number' && isFinite(cr.remainingAmount) && cr.remainingAmount >= 0) {
+              const amtText = Number.isInteger(cr.remainingAmount) ? String(cr.remainingAmount) : cr.remainingAmount.toFixed(2);
+              footerHtml += '<div class="quota-row"><div><div class="label">' + mEsc(cr.label || 'AI Credits') + '</div></div><div class="value" style="color:var(--blue)">' + mEsc(amtText) + '</div></div>';
+            }
+          }
+          if (!limits.length && !footerHtml) {
+            cards.push(renderNoQuota(p.label, sub, '快照无有效配额数据'));
+          } else {
+            cards.push(renderQuotaCard(p.label, sub, limits, { badgeHtml, footerHtml }));
+          }
         } else {
           cards.push(renderNoQuota(p.label, host, 'API返回异常'));
         }
@@ -979,10 +1014,10 @@ async function fetchHealth() {
       cdpEl.textContent = '\u26a0\ufe0f ' + maxCpu.toFixed(0) + '%';
       cdpEl.style.color = maxCpu > 50 ? 'var(--red)' : 'var(--yellow)';
       
-      let pages = d.cdp_pages ? d.cdp_pages.join(' \u00b7 ') : '';
+      let pages = d.cdp_pages ? d.cdp_pages.map(p => mEsc(p)).join(' \u00b7 ') : '';
       warnEl.style.display = 'block';
       warnEl.innerHTML = '\ud83d\udd34 CDP Chrome \u5b58\u5728\u9ad8CPU\u9875\u9762: ' + 
-        d.cdp_renderers.map(r => 'PID ' + r.pid + ' (' + r.cpu.toFixed(0) + '%)').join(', ') +
+        d.cdp_renderers.map(r => 'PID ' + mEsc(r.pid) + ' (' + r.cpu.toFixed(0) + '%)').join(', ') +
         (pages ? '<br>\ud83d\udda5 \u6253\u5f00\u9875\u9762: ' + pages : '');
     } else {
       cdpEl.textContent = '\u2705 \u6b63\u5e38';
@@ -995,8 +1030,6 @@ async function fetchHealth() {
 }
 
 // ===== Cron 模块 =====
-const AGENT_CRON_NAMES = {main:'罗氏虾',jiweixia:'基围虾',caoxia:'草虾',pipixia:'皮皮虾',banjiexia:'斑节虾',duijiaoxia:'对焦虾',shanbei:'扇贝',hailuo:'海螺',xiaohexia:'小河虾',haixing:'海星',haima:'海马',yoooclaw:'YoooClaw'};
-
 function tsToTime(ms) {
   if (!ms) return '-';
   const d = new Date(ms);
@@ -1077,9 +1110,9 @@ async function fetchCron() {
       else modelHtml = '<span title="未指定，继承全局默认模型" style="color:var(--dim)">默认</span>';
       html += `<tr class="${cls}">
         <td><strong>${mEsc(j.name)}</strong></td>
-        <td><span style="font-size:11px;color:var(--dim)">${j.agentName||AGENT_CRON_NAMES[j.agentId]||j.agentId||'—'}</span></td>
-        <td style="font-size:11px;color:var(--dim);max-width:180px">${j.purpose||'未标注'}</td>
-        <td>${j.scheduleHuman||humanPeriod(j.schedule,j.tz)}</td>
+        <td><span style="font-size:11px;color:var(--dim)">${mEsc(j.agentName||AGENT_NAMES[j.agentId]||j.agentId||'—')}</span></td>
+        <td style="font-size:11px;color:var(--dim);max-width:180px">${mEsc(j.purpose||'未标注')}</td>
+        <td>${mEsc(j.scheduleHuman||humanPeriod(j.schedule,j.tz))}</td>
         <td>${tsToTime(j.lastRunAtMs)}</td>
         <td>${statusHtml}</td>
         <td>${tsToTime(j.nextRunAtMs)}</td>
@@ -1091,9 +1124,9 @@ async function fetchCron() {
       for (const j of ocDis) {
         html += `<tr class="dis-row" data-layer="openclaw" style="display:none">
         <td><span style="text-decoration:line-through">${mEsc(j.name)}</span></td>
-        <td><span style="font-size:11px">${j.agentName||AGENT_CRON_NAMES[j.agentId]||j.agentId||'—'}</span></td>
-        <td style="font-size:11px;max-width:180px">${j.purpose||'未标注'}</td>
-        <td>${j.scheduleHuman||humanPeriod(j.schedule,j.tz)}</td>
+        <td><span style="font-size:11px">${mEsc(j.agentName||AGENT_NAMES[j.agentId]||j.agentId||'—')}</span></td>
+        <td style="font-size:11px;max-width:180px">${mEsc(j.purpose||'未标注')}</td>
+        <td>${mEsc(j.scheduleHuman||humanPeriod(j.schedule,j.tz))}</td>
         <td>${tsToTime(j.lastRunAtMs)}</td>
         <td>⏸ 已停用</td>
         <td>—</td>
@@ -1107,11 +1140,11 @@ async function fetchCron() {
     // Crontab 表：活跃行 + 已停用折叠组（注释行停用条目：保留 schedule/purpose/停用日期/原因）
     html = '';
     for (const c of ctAct) {
-      const purpose = c.purpose || '未标注';
-      const period = c.scheduleHuman || c.schedule;
-      const cmd = c.command || '';
+      const purpose = mEsc(c.purpose || '未标注');
+      const period = mEsc(c.scheduleHuman || c.schedule);
+      const cmd = mEsc(c.command || '');
       const comment = c.comment || '';
-      const detail = comment ? `<div style="font-size:10px;color:var(--dim);margin-top:2px">${comment}</div>` : '';
+      const detail = comment ? `<div style="font-size:10px;color:var(--dim);margin-top:2px">${mEsc(comment)}</div>` : '';
       html += `<tr>
         <td>${purpose}${detail}</td>
         <td>${period}</td>
@@ -1121,10 +1154,10 @@ async function fetchCron() {
     if (ctDis.length > 0) {
       html += disToggleRow('crontab', 3, ctDis.length);
       for (const c of ctDis) {
-        const purpose = c.purpose || '未标注';
-        const period = c.scheduleHuman || c.schedule;
-        const cmd = c.command || '';
-        const disInfo = `🚫 ${c.disabledAction || '停用'}于 ${c.disabledDate || '?'}` + (c.disabledReason ? ` · ${c.disabledReason}` : '');
+        const purpose = mEsc(c.purpose || '未标注');
+        const period = mEsc(c.scheduleHuman || c.schedule);
+        const cmd = mEsc(c.command || '');
+        const disInfo = `🚫 ${mEsc(c.disabledAction || '停用')}于 ${mEsc(c.disabledDate || '?')}` + (c.disabledReason ? ` · ${mEsc(c.disabledReason)}` : '');
         html += `<tr class="dis-row" data-layer="crontab" style="display:none">
         <td>${purpose}<div style="font-size:10px;margin-top:2px">${disInfo}</div></td>
         <td>${period}</td>
@@ -1142,9 +1175,9 @@ async function fetchCron() {
       if (a.status === 'running') statusHtml = '<span style="color:var(--green)">● 运行中</span>';
       else statusHtml = '<span style="color:var(--yellow)">◐ 已加载</span>';
       html += `<tr>
-        <td><strong>${a.name}</strong></td>
-        <td style="font-size:11px;color:var(--dim);max-width:200px">${a.purpose||'未标注'}</td>
-        <td style="font-size:12px">${a.runMode||'—'}</td>
+        <td><strong>${mEsc(a.name)}</strong></td>
+        <td style="font-size:11px;color:var(--dim);max-width:200px">${mEsc(a.purpose||'未标注')}</td>
+        <td style="font-size:12px">${mEsc(a.runMode||'—')}</td>
         <td>${a.runAtLoad ? '✅' : '—'}</td>
         <td>${statusHtml}</td>
       </tr>`;
@@ -1153,9 +1186,9 @@ async function fetchCron() {
       html += disToggleRow('launch', 5, laStop.length);
       for (const a of laStop) {
         html += `<tr class="dis-row" data-layer="launch" style="display:none">
-        <td><span style="text-decoration:line-through">${a.name}</span></td>
-        <td style="font-size:11px;max-width:200px">${a.purpose||'未标注'}</td>
-        <td style="font-size:12px">${a.runMode||'—'}</td>
+        <td><span style="text-decoration:line-through">${mEsc(a.name)}</span></td>
+        <td style="font-size:11px;max-width:200px">${mEsc(a.purpose||'未标注')}</td>
+        <td style="font-size:12px">${mEsc(a.runMode||'—')}</td>
         <td>${a.runAtLoad ? '✅' : '—'}</td>
         <td>○ 已停止</td>
       </tr>`;
@@ -1175,9 +1208,9 @@ async function fetchCron() {
         if (h.enabled) hbOn++;
         const statusHtml = h.enabled ? '<span class="cron-status-ok">● 启用</span>' : '<span class="cron-status-unknown">○ 关闭</span>';
         hbHtml += `<tr>
-          <td><strong>${mEsc(h.agentName||h.agentId)}</strong></td>
-          <td>${h.every||'?'}</td>
-          <td>${h.target||'none'}</td>
+          <td><strong>${mEsc(h.agentName||AGENT_NAMES[h.agentId]||h.agentId)}</strong></td>
+          <td>${mEsc(h.every||'?')}</td>
+          <td>${mEsc(h.target||'none')}</td>
           <td>${statusHtml}</td>
         </tr>`;
       }
@@ -1282,7 +1315,7 @@ async function fetchEmailStatus() {
     const summary = document.getElementById('emailSummary');
 
     if (d.error) {
-      card.innerHTML = '<div class="error">⚠️ ' + d.error + '</div>';
+      card.innerHTML = '<div class="error">⚠️ ' + mEsc(d.error) + '</div>';
       summary.textContent = '';
       return;
     }
@@ -1386,7 +1419,7 @@ async function fetchSystemTasks() {
     summary.style.color = runningCount > 0 ? 'var(--green)' : 'var(--dim)';
   } catch(e) {
     const card = document.getElementById('systemTaskCard');
-    if (card) card.innerHTML = '<div class="error">系统任务获取失败: ' + e.message + '</div>';
+    if (card) card.innerHTML = '<div class="error">系统任务获取失败: ' + mEsc(e.message) + '</div>';
   }
 }
 

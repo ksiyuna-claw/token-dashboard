@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """虾厂 Token 看板 HTTP 服务"""
 import http.server, json, subprocess, os, time, urllib.request, urllib.error, threading, uuid, logging, logging.handlers, gc, resource, functools, plistlib, hmac, hashlib, base64, sqlite3, shutil  # B7(2026-09-11): sqlite3提模块级，原函数内重复import在循环调用下纯浪费；shutil(2026-11-11): 磁盘口径修正用
+from urllib.parse import urlsplit
 
 # ── Auth 配置（JWT 无状态认证）─────────
 _AUTH_ENV_PATH = os.path.join(os.path.expanduser('~'), '.openclaw/workspace/ai_workspace/projects/2026-06-04-量化信息看板/.env')
@@ -40,10 +41,18 @@ def _cors_origin(handler):
     origin = handler.headers.get('Origin', '')
     return origin if origin in _ALLOWED_ORIGINS else 'http://127.0.0.1:18888'
 
-# ── Quota 缓存（P0，超时fallback用）────────────────────
-_quota_cache = {}  # {provider_id: (timestamp, data)}
-_quota_cache_lock = threading.Lock()
-_QUOTA_CACHE_TTL = 60  # 60秒
+# ── Quota 模块导出（2026-11-25 抽离至 dashboard_quota.py，保留模块级别名兼容）──
+from dashboard_quota import (
+    PROVIDER_QUOTA_API,
+    PROVIDER_LABELS,
+    HIDDEN_PROVIDERS,
+    QUOTA_CACHE_TTL as _QUOTA_CACHE_TTL,
+    _quota_cache,
+    _quota_cache_lock,
+    codex_valid_pct as _codex_valid_pct,
+    get_providers as _dq_get_providers,
+    fetch_quota as _dq_fetch_quota,
+)
 
 def _load_auth_password():
     """从量化看板 .env 读取 DASHBOARD_PASSWORD"""
@@ -108,12 +117,6 @@ def _jwt_verify(token: str) -> bool:
         return True
     except Exception:
         return False
-
-def _codex_valid_pct(v):
-    # R2(1110): Codex用量百分比契约校验——必须为有限、非负数字（bool/字符串/NaN/Inf/负值/None均非法）
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        return False
-    return v == v and v not in (float('inf'), float('-inf')) and v >= 0
 
 def _check_login_rate_limit(client_ip):
     """检查登录频率，返回True表示允许尝试"""
@@ -265,17 +268,12 @@ def _log_ws_error(e):
     _last_ws_error_at[_k] = now
     logging.warning(f'[WS] error[{_k}] (rate-limited 60s/bucket): {type(e).__name__}: {str(e)[:200]}')
 
-# 海外 API 需要走代理
-_PROXY_HANDLER = urllib.request.ProxyHandler({
-    'http': 'http://127.0.0.1:7890',
-    'https': 'http://127.0.0.1:7890',
-})
-_PROXY_OPENER = urllib.request.build_opener(_PROXY_HANDLER)
-
 DIR = os.path.join(os.path.expanduser('~'), '.openclaw/workspace/ai_workspace/scripts')
 SNAPSHOT = os.path.join(DIR, 'token_snapshot.json')
 OPENCLAW_JSON = os.path.join(os.path.expanduser('~'), '.openclaw/openclaw.json')
 AUTH_PROFILES = os.path.join(os.path.expanduser('~'), '.openclaw/agents/main/agent/auth-profiles.json')
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+_ANTIGRAVITY_SNAPSHOT_PATH = os.path.join(_PROJECT_DIR, 'data', 'antigravity_quota.json')
 
 # ── 缓存层：避免每次前端轮询都 spawn CLI subprocess ──────────────────────────
 _CACHE_TTL = 15  # 缓存有效期（秒）
@@ -288,46 +286,6 @@ from dashboard_background import BackgroundWork
 from dashboard_status import ReviewWaits, public_activity
 
 _sessions_refresh_lock = threading.Lock()
-
-# ── Provider 额度 API 映射 ──────────────────────────────
-# baseUrl 模式匹配 → (额度API URL, 类型)
-# type: 'zhipu_quota' = 智谱额度API, 'deepseek_balance' = DeepSeek余额API
-PROVIDER_QUOTA_API = {
-    'open.bigmodel.cn': ('https://open.bigmodel.cn/api/monitor/usage/quota/limit', 'zhipu_quota'),
-    'api.z.ai': ('https://api.z.ai/api/monitor/usage/quota/limit', 'zhipu_quota'),
-    'api.deepseek.com': ('https://api.deepseek.com/user/balance', 'deepseek_balance'),
-    # 2026-07-23 MiniMax套餐到期下线，代码保留备用
-    # 'api.minimaxi.com': ('https://api.minimaxi.com/v1/token_plan/remains', 'minimax_quota'),
-    'api.moonshot.cn': ('https://api.moonshot.cn/v1/users/me/balance', 'kimi_balance'),
-    'api.kimi.com': ('https://api.kimi.com/coding/v1/usages', 'kimi_coding_plan'),
-    # NeuroSpark（2026-11-20 匡书记指令：用量/消费上额度板块；后付费模式无余额端点，
-    # /v1/usage 提供总消费/今日消费/调用量/分模型spend；WAF拦urllib→代理方法内 curl_cffi）
-    'api.neuro-spark.ai': ('https://api.neuro-spark.ai/v1/usage', 'neurospark_usage'),
-    # dashscope（阿里云百炼）是语音/声图模型（ASR/TTS/文生图），非 LLM 文本生成，
-    # Token 看板只看 LLM 用量，故不在此注册 → _get_providers() 会跳过它，看板不展示。
-    # （openclaw.json 里的 dashscope provider 必须保留，它供语音/声图调用，与本看板无关）
-}
-
-PROVIDER_LABELS = {
-    'zhipu': '智谱 BigModel（国内）',
-    'zai': '智谱 BigModel（海外）',
-    'deepseek': 'DeepSeek',
-    'neurospark': 'NeuroSpark（Claude/GLM中转）',
-    # 2026-07-23 MiniMax套餐到期下线，代码保留备用
-    # 'minimax': 'MiniMax（编程套餐）',
-    'kimi': 'Kimi（Moonshot）',
-}
-
-# ── 看板隐藏的 provider（2026-08-14 匡书记批准：方案A改良版）──────────────
-# zai（智谱海外）：Coding Plan 已于 2026-08-07 到期未续费。2026-08-14 基围虾用
-# `openclaw onboard --auth-choice zai-coding-cn` 重写 openclaw.json 的 zai provider，
-# 实际挂的是国内端点 open.bigmodel.cn + 国内 Key（与 zhipu 完全同 Key 同端点同额度接口）。
-# openclaw.json 的 zai 是全厂 default 模型 zai/glm-5.2 的路由依赖，绝不能删；
-# 因此在看板侧隐藏：zai 不进 /providers 响应 → 前端无卡片、服务端不为其发起
-# 任何额度查询/缓存（省掉与 zhipu 卡完全重复的额度 API 调用，纯浪费带宽）。
-# 🔄 恢复方法：从下面集合中移除 'zai' 即可（代码保留以防万一，
-#    PROVIDER_QUOTA_API / PROVIDER_LABELS 的 zai 条目均未动）。
-HIDDEN_PROVIDERS = {'zai'}
 
 # 从 transcript 读实际调用模型（session 元数据的 model 是配置值，不准）
 AGENTS_DIR = os.path.join(os.path.expanduser('~'), '.openclaw/agents')
@@ -610,7 +568,6 @@ def _hermes_health():
     监测四层维持措施：进程存活+uptime、gateway.heartbeat 心跳年龄、watchdog 动作日志、TG通道状态
     2026-10-14 新增第4项TG通道状态：读 gateway_state.json 的 platforms.telegram（同源watchdog v5.2，看板管可见不管自愈）
     """
-    import subprocess as _sp
     import datetime as _dt
     hermes_home = os.path.join(os.path.expanduser('~'), '.hermes')
     info = {
@@ -620,27 +577,14 @@ def _hermes_health():
         'tg_state': 'unknown', 'tg_state_age': None,  # 2026-10-14 TG通道状态，默认unknown（fail-safe）
         'note': '',
     }
-    # 1. 进程存活 + uptime
+    # 1. 进程存活 + uptime（复用 _ps_snapshot 共享快照，避免每15s单独起 ps 子进程）
     try:
-        out = _sp.check_output(['ps', '-A', '-o', 'pid,etime,command'], text=True)
-        for line in out.splitlines():
-            if 'hermes_cli.main' in line and ' gateway' in line and 'grep' not in line:
+        for pid, _ppid, et_sec, _rss_kb, cmd in _ps_snapshot():
+            if 'hermes_cli.main' in cmd and ' gateway' in cmd and 'grep' not in cmd:
                 info['running'] = True
-                parts = line.split()
-                info['pid'] = int(parts[0])
-                et = parts[1]
-                if '-' in et:
-                    d, hms = et.split('-', 1)
-                    h, m, s = hms.split(':')
-                    info['uptimeHours'] = round(int(d) * 24 + int(h) + int(m) / 60, 1)
-                else:
-                    p2 = et.split(':')
-                    if len(p2) == 3:
-                        # HH:MM:SS（超1小时场景，如 30:30:00 = 30.5h）
-                        info['uptimeHours'] = round(int(p2[0]) + int(p2[1]) / 60, 1)
-                    elif len(p2) == 2:
-                        # MM:SS（不足1小时）
-                        info['uptimeHours'] = round(int(p2[0]) / 60 + int(p2[1]) / 3600, 2)
+                info['pid'] = pid
+                if et_sec is not None:
+                    info['uptimeHours'] = round(et_sec / 3600, 2 if et_sec < 3600 else 1)
                 break
     except Exception:
         pass
@@ -700,114 +644,9 @@ def _last_actual_model(session_id, agent_id):
     p = _recent_model_dist(session_id, agent_id)
     return p['last']['model'], p['last']['provider']
 
-def _load_auth_keys():
-    """从 auth-profiles.json 读取 provider → apiKey 映射"""
-    try:
-        with open(AUTH_PROFILES) as f:
-            data = json.load(f)
-        result = {}
-        for pid, profile in data.get('profiles', {}).items():
-            provider = pid.split(':')[0]
-            key = profile.get('key', '')
-            if key:
-                result[provider] = key
-        return result
-    except Exception:
-        return {}
-
 def _get_providers():
-    """从 openclaw.json + auth-profiles.json 读取 providers 配置"""
-    try:
-        with open(OPENCLAW_JSON) as f:
-            cfg = json.load(f)
-        providers_cfg = cfg.get('models', {}).get('providers', {})
-        auth_keys = _load_auth_keys()
-        result = []
-        for pid, p in providers_cfg.items():
-            # 隐藏的 provider：不展示卡片、不发额度查询（原因见 HIDDEN_PROVIDERS 注释）
-            if pid in HIDDEN_PROVIDERS:
-                continue
-            base_url = p.get('baseUrl', '')
-            # apiKey 优先从 openclaw.json 读，fallback 到 auth-profiles.json
-            api_key = p.get('apiKey', '') or auth_keys.get(pid, '')
-            # 匹配额度 API
-            # 特殊处理：kimi 的 baseUrl 是 api.kimi.com/coding/v1（Coding Plan），
-            # 但也有 api.moonshot.cn（开放平台余额）。优先匹配 Coding Plan。
-            quota_api, quota_type = None, None
-            if pid == 'kimi':
-                # 优先用 Coding Plan 额度 API
-                quota_api, quota_type = PROVIDER_QUOTA_API.get('api.kimi.com')
-            if not quota_api:
-                for host, (url, qtype) in PROVIDER_QUOTA_API.items():
-                    if host in base_url:
-                        quota_api, quota_type = url, qtype
-                        break
-            if not quota_api and quota_type != 'no_quota':
-                continue  # 没有额度 API 的 provider 跳过（no_quota 类型的加占位卡片）
-            if not api_key or len(api_key) < 10:
-                continue  # 没有有效 apiKey 的跳过
-            result.append({
-                'id': pid,
-                'label': PROVIDER_LABELS.get(pid, pid),
-                'baseUrl': base_url,
-                'apiKey': api_key,
-                'quotaApi': quota_api,
-                'quotaType': quota_type,
-            })
-        # RunPod GPU云（2026-10-28 匡书记指令：余额+pod状态上额度区块）
-        # 非LLM provider、不在openclaw.json，静态注入；key放本项目config.json（gitignore已忽略）
-        try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')) as f:
-                rp_key = json.load(f).get('runpod_key', '')
-            if rp_key and len(rp_key) >= 10:
-                result.append({
-                    'id': 'runpod',
-                    'label': 'RunPod GPU云（数字人口播）',
-                    'baseUrl': 'https://api.runpod.io',
-                    'apiKey': rp_key,
-                    'quotaApi': 'https://api.runpod.io/graphql',
-                    'quotaType': 'runpod_gpu',
-                })
-        except Exception:
-            pass  # config读不到/格式错 → 不展示RunPod卡片，不影响其他provider
-        # Codex 用量（2026-11-10 匡书记指令：codex剩余用量上额度区块）
-        # 非LLM provider、不在openclaw.json，静态注入；凭证=~/.codex/auth.json（ChatGPT OAuth，代理方法内现读，不落配置）
-        try:
-            with open(os.path.expanduser('~/.codex/auth.json')) as f:
-                cd_tok = (json.load(f).get('tokens') or {}).get('access_token') or ''
-            if cd_tok and len(cd_tok) >= 20:
-                result.append({
-                    'id': 'codex',
-                    'label': 'Codex（ChatGPT订阅）',
-                    'baseUrl': 'https://chatgpt.com',
-                    'apiKey': 'oauth',
-                    'quotaApi': 'https://chatgpt.com/backend-api/codex/usage',
-                    'quotaType': 'codex_usage',
-                })
-        except Exception:
-            pass  # auth.json读不到 → 不展示Codex卡片，不影响其他provider
-        # TikHub 社媒数据API（2026-11-19 匡书记指令：余额上额度区块）
-        # 非LLM provider、不在openclaw.json，静态注入；key放本项目config.json（gitignore已忽略）
-        try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')) as f:
-                th_key = json.load(f).get('tikhub_key', '')
-            if th_key and len(th_key) >= 20:
-                result.append({
-                    'id': 'tikhub',
-                    'label': 'TikHub（社媒数据采集）',
-                    'baseUrl': 'https://api.tikhub.io',
-                    'apiKey': th_key,
-                    'quotaApi': 'https://api.tikhub.io/api/v1/tikhub/user/get_user_info',
-                    'quotaType': 'tikhub_balance',
-                })
-        except Exception:
-            pass  # config读不到 → 不展示TikHub卡片，不影响其他provider
-        # 2026-11-23 匡书记布局指令：Codex首位、DeepSeek末位，其余保持原相对序（等高卡片目标）
-        _first = ['codex']; _last = ['deepseek']
-        result.sort(key=lambda p: (0 if p['id'] in _first else 2 if p['id'] in _last else 1))
-        return result
-    except Exception as e:
-        return []
+    """从 openclaw.json + auth-profiles.json + config.json 读取 providers 配置"""
+    return _dq_get_providers(OPENCLAW_JSON, AUTH_PROFILES, _PROJECT_DIR)
 
 # ── 用途标注（服务/调度 → 所属项目）──────────────────────────
 # 2026-08-27 全量对齐 sqlite 实际 job 名（旧键名与现名不符致总览页用途列大面积"—"，匡书记报修）
@@ -928,9 +767,22 @@ def _get_system_health():
     """获取系统健康指标（CPU、内存、CDP Chrome）"""
     result = {'ts': time.time()}
     try:
-        # CPU 使用率（1秒采样）
-        r = subprocess.run(['/bin/ps', '-A', '-o', '%cpu'], capture_output=True, text=True, timeout=5)
-        total_cpu = sum(float(x) for x in r.stdout.strip().split('\n')[1:] if x.strip())
+        # CPU 使用率 + CDP Chrome 重页面检测（合并为单次 ps 调用）
+        r = subprocess.run(['/bin/ps', '-A', '-o', 'pid=,%cpu=,rss=,command='], capture_output=True, text=True, timeout=5)
+        total_cpu = 0.0
+        cdp_renderers = []
+        for line in r.stdout.splitlines():
+            parts = line.strip().split(None, 3)
+            if len(parts) < 3:
+                continue
+            try:
+                cpu = float(parts[1])
+                total_cpu += cpu
+                cmd = parts[3] if len(parts) > 3 else ''
+                if 'chrome-debug' in cmd and 'renderer' in cmd and cpu > 10:
+                    cdp_renderers.append({'pid': parts[0], 'cpu': round(cpu, 1), 'rss_mb': round(int(parts[2]) / 1024, 1)})
+            except ValueError:
+                continue
         ncpu = os.cpu_count() or 1
         result['cpu_pct'] = round(total_cpu / ncpu, 1)
         result['cpu_cores'] = ncpu
@@ -963,22 +815,6 @@ def _get_system_health():
             result['swap_used_m'] = round(int(m.group(2)) / (1024**2), 1)
             result['swap_pct'] = round(int(m.group(2)) / int(m.group(1)) * 100, 1) if int(m.group(1)) else 0
 
-        # CDP Chrome 重页面检测
-        cdp_renderers = []
-        r = subprocess.run(['/bin/ps', 'aux'], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.split('\n'):
-            if 'chrome-debug' not in line or 'renderer' not in line:
-                continue
-            parts = line.strip().split()
-            try:
-                cpu = float(parts[2])
-                rss = int(parts[5])
-                pid = parts[1]
-                if cpu > 10:  # 超过10%才记录
-                    cdp_renderers.append({'pid': pid, 'cpu': round(cpu, 1), 'rss_mb': round(rss / 1024, 1)})
-            except (ValueError, IndexError):
-                continue
-
         if cdp_renderers:
             # 尝试获取页面标题
             try:
@@ -987,7 +823,7 @@ def _get_system_health():
                     pages = json.loads(resp.read())
                     titles = [p.get('title', '')[:30] for p in pages if p.get('type') == 'page']
                     result['cdp_pages'] = titles[:5]
-            except:
+            except Exception:
                 pass
         result['cdp_renderers'] = cdp_renderers
         result['cdp_ok'] = len(cdp_renderers) == 0
@@ -1506,7 +1342,6 @@ def _sys_task_monitor_loop():
             logging.warning(f'[SysTask] 扫描异常: {e}')
         time.sleep(_SYS_TASK_SCAN_INTERVAL)
 
-@cached(60)
 @cached(120)
 def _get_openclaw_cron():
     """获取所有 agent 的 openclaw cron 汇总（并发遍历）
@@ -1859,285 +1694,19 @@ class H(http.server.SimpleHTTPRequestHandler):
     def _send_json(self, status, data, extra_headers=None):
         """安全发送 JSON 响应。如果客户端已断开（BrokenPipe/ConnectionReset），静默处理。"""
         try:
+            body = json.dumps(data).encode('utf-8')
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
             self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
             if extra_headers:
                 for k, v in extra_headers.items():
                     self.send_header(k, v)
             self.end_headers()
-            self.wfile.write(json.dumps(data).encode())
+            self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # 客户端（cloudflared）已断开，无法发送——静默丢弃
             logging.debug('client disconnected before response (provider may have been slow)')
-
-    def _proxy_quota(self, api_url, api_key, provider_id):
-        """代理请求额度 API，返回 JSON 给浏览器。带缓存+超时fallback。"""
-        # 1. 查缓存（TTL 内直接返回；过期后仍保留旧缓存用于 fallback）
-        now = time.time()
-        with _quota_cache_lock:
-            c = _quota_cache.get(provider_id)
-            if c and now - c[0] < _QUOTA_CACHE_TTL:
-                self._send_json(200, c[1])
-                return
-            stale_cache = c  # 过期缓存也留着，超时时 fallback 用
-
-        # 2. 调上游API（超时 10 秒，原 5 秒太短导致 kimi/智谱偶尔超时）
-        try:
-            headers = {'Authorization': 'Bearer ' + api_key}
-            # Kimi Coding Plan 需要特殊 User-Agent
-            if 'kimi.com/coding' in api_url:
-                headers['User-Agent'] = 'KimiCLI/1.6'
-            req = urllib.request.Request(api_url, headers=headers)
-            # 2026-07-23 MiniMax套餐到期下线，去掉 'minimaxi' in api_url 条件（代码保留备用）
-            if 'z.ai' in api_url or 'deepseek' in api_url or 'moonshot' in api_url or 'kimi.com' in api_url:
-                with _PROXY_OPENER.open(req, timeout=10) as resp:
-                    data = json.loads(resp.read())
-            else:
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read())
-            # 成功 → 更新缓存
-            with _quota_cache_lock:
-                _quota_cache[provider_id] = (now, data)
-            self._send_json(200, data)
-        except (urllib.error.URLError, TimeoutError) as e:
-            # 超时 → fallback 到旧缓存（即使过期），无缓存才返回 504
-            if stale_cache:
-                data = dict(stale_cache[1])
-                data['cached'] = True
-                self._send_json(200, data)
-            else:
-                self._send_json(504, {'error': '上游API超时', 'cached': False})
-        except Exception as e:
-            # 其他错误 → 也 fallback 到旧缓存
-            if stale_cache:
-                data = dict(stale_cache[1])
-                data['cached'] = True
-                self._send_json(200, data)
-            else:
-                self._send_json(502, {'error': str(e)})
-
-    def _proxy_runpod(self, api_key, provider_id):
-        """RunPod 余额+Pod状态（2026-10-28）：GraphQL clientBalance + REST v2 /v2/pods 合成查询。
-        缓存/超时fallback策略与 _proxy_quota 一致（60s TTL + 旧缓存兜底）。"""
-        from urllib.parse import quote
-        now = time.time()
-        with _quota_cache_lock:
-            c = _quota_cache.get(provider_id)
-            if c and now - c[0] < _QUOTA_CACHE_TTL:
-                self._send_json(200, c[1])
-                return
-            stale_cache = c
-        try:
-            # ① 余额：GraphQL v1端点，api_key走query param（/graphql/v2实测404勿用；字段名clientBalance非balance）
-            gql_req = urllib.request.Request(
-                'https://api.runpod.io/graphql?api_key=' + quote(api_key),
-                data=json.dumps({'query': '{ myself { clientBalance } }'}).encode('utf-8'),
-                headers={'Content-Type': 'application/json'}, method='POST')
-            with _PROXY_OPENER.open(gql_req, timeout=10) as resp:
-                balance = json.loads(resp.read())['data']['myself']['clientBalance']
-            # ② Pod状态：REST v2 Bearer认证；字段名按官方OpenAPI示例（status/gpu{id,count}/cost/startedAt）
-            pods_req = urllib.request.Request('https://api.runpod.io/v2/pods',
-                headers={'Authorization': 'Bearer ' + api_key})
-            with _PROXY_OPENER.open(pods_req, timeout=10) as resp:
-                pods = json.loads(resp.read()).get('pods', [])
-            # R1(2026-10-28 R1审): 展示列表排除TERMINATED；podCount=可见Pod总数、runningCount只计RUNNING（不再用len(pods)把关机Pod计成运行中）
-            visible_pods = [x for x in pods if (x.get('status') or '').strip().upper() != 'TERMINATED']
-            running_count = sum(1 for pd in visible_pods if (pd.get('status') or '').strip().upper() == 'RUNNING')
-            pod_list = []
-            for pd in visible_pods[:6]:
-                g = pd.get('gpu') or {}
-                gpu_str = (g.get('id') or '') + ('×' + str(g['count']) if (g.get('count') or 1) > 1 else '')
-                pod_list.append({'name': pd.get('name') or pd.get('id'), 'status': pd.get('status'),
-                                 'gpu': gpu_str, 'costPerHr': pd.get('cost'), 'startedAt': pd.get('startedAt')})
-            data = {'balance': balance, 'podCount': len(visible_pods),
-                    'runningCount': running_count,
-                    'pods': pod_list}
-            with _quota_cache_lock:
-                _quota_cache[provider_id] = (now, data)
-            self._send_json(200, data)
-        except (urllib.error.URLError, TimeoutError) as e:
-            if stale_cache:
-                d2 = dict(stale_cache[1]); d2['cached'] = True
-                self._send_json(200, d2)
-            else:
-                self._send_json(504, {'error': 'RunPod API超时: ' + str(e), 'cached': False})
-        except Exception as e:
-            if stale_cache:
-                d2 = dict(stale_cache[1]); d2['cached'] = True
-                self._send_json(200, d2)
-            else:
-                self._send_json(502, {'error': str(e), 'cached': False})
-
-    def _proxy_tikhub(self, api_key, provider_id):
-        """TikHub 余额（2026-11-19）：GET api.tikhub.io/api/v1/tikhub/user/get_user_info（Bearer）。
-        实测直连可达（不走代理）；凭证只进请求头，响应仅透出余额/免费额度/账号状态（email等不透出）。
-        缓存/超时fallback同 _proxy_quota（60s TTL+旧缓存兑底）。"""
-        now = time.time()
-        with _quota_cache_lock:
-            c = _quota_cache.get(provider_id)
-            if c and now - c[0] < _QUOTA_CACHE_TTL:
-                self._send_json(200, c[1])
-                return
-            stale_cache = c
-        try:
-            # 🔴 TikHub WAF按TLS指纹拦截Python默认指纹（issue-0379，实测urllib直连403/curl过）
-            # → curl_cffi impersonate chrome；status/code双校验，非200拖出走兑底
-            from curl_cffi import requests as cffi_requests
-            r = cffi_requests.get('https://api.tikhub.io/api/v1/tikhub/user/get_user_info',
-                headers={'Authorization': 'Bearer ' + api_key},
-                impersonate='chrome', timeout=10)
-            if r.status_code != 200:
-                raise ValueError('TikHub API HTTP %d' % r.status_code)
-            d = r.json()
-            if (d or {}).get('code') != 200:
-                raise ValueError('TikHub业务码异常: %r' % (d or {}).get('code'))
-            u = (d or {}).get('user_data') or {}
-            balance = u.get('balance')
-            free_credit = u.get('free_credit')
-            if not isinstance(balance, (int, float)):
-                raise ValueError('balance字段缺失或非数值: %r' % (balance,))
-            active = bool(u.get('is_active')) and not bool(u.get('account_disabled'))
-            data = {'balance': float(balance),
-                    'freeCredit': float(free_credit) if isinstance(free_credit, (int, float)) else 0.0,
-                    'active': active}
-            with _quota_cache_lock:
-                _quota_cache[provider_id] = (now, data)
-            self._send_json(200, data)
-        except Exception as e:
-            msg = str(e)
-            if stale_cache:
-                d2 = dict(stale_cache[1]); d2['cached'] = True
-                self._send_json(200, d2)
-            elif ('imeout' in msg) or ('timed out' in msg):
-                self._send_json(504, {'error': 'TikHub API超时: ' + msg, 'cached': False})
-            else:
-                self._send_json(502, {'error': msg, 'cached': False})
-
-    def _proxy_neurospark(self, api_key, provider_id):
-        """NeuroSpark 用量/消费（2026-11-20）：GET api.neuro-spark.ai/v1/usage（Bearer）。
-        后付费模式无余额端点（dashboard/credits/billing 族全 404 实测）——卡片展示累计/今日消费+调用量+分模型spend。
-        🔴 WAF 拦 urllib（实测403）→ curl_cffi impersonate chrome（TikHub issue-0379 同族）；
-        凭证只进请求头，响应不含 key/customer_id/account_id。缓存/兑底同 _proxy_quota。"""
-        now = time.time()
-        with _quota_cache_lock:
-            c = _quota_cache.get(provider_id)
-            if c and now - c[0] < _QUOTA_CACHE_TTL:
-                self._send_json(200, c[1])
-                return
-            stale_cache = c
-        try:
-            from curl_cffi import requests as cffi_requests
-            r = cffi_requests.get('https://api.neuro-spark.ai/v1/usage',
-                headers={'Authorization': 'Bearer ' + api_key},
-                impersonate='chrome', timeout=10)
-            if r.status_code != 200:
-                raise ValueError('NeuroSpark API HTTP %d' % r.status_code)
-            d = r.json()
-            if not isinstance(d, dict) or 'total_spend' not in d:
-                raise ValueError('NeuroSpark响应结构异常: 缺total_spend')
-            def _strict(v, name):
-                # R1修复(2026-11-20 R1审)：核心字段非法即报错（bool是int子类先排；仅接受有限非负数值），
-                # 禁止默认值0掩盖异常（total_spend='abc'曾伪装成$0真实消费）
-                import math
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
-                    raise ValueError('NeuroSpark字段%s非法: %r' % (name, v))
-                return float(v)
-            # 模型行策略：非法行跳过不展示（展示层过滤），顶层核心字段非法抛错走兑底/502
-            # R1修复(round3)：spend/calls 加 math.isfinite——Infinity/NaN 行直接跳过，
-            # 防 inf 进 topModels 被 json.dumps 输出非标准 Infinity 破坏 r.json() 且污染缓存
-            import math as _math
-            used = [x for x in (d.get('rows') or [])
-                    if isinstance(x, dict) and isinstance(x.get('spend'), (int, float))
-                    and not isinstance(x.get('spend'), bool)
-                    and _math.isfinite(float(x['spend'])) and float(x['spend']) > 0]
-            used.sort(key=lambda x: -float(x['spend']))
-            def _row_calls(v):
-                return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
-                    and _math.isfinite(v) and v >= 0 else 0
-            data = {'totalSpend': _strict(d.get('total_spend'), 'total_spend'),
-                    'todaySpend': _strict(d.get('today_spend'), 'today_spend'),
-                    'totalCalls': int(_strict(d.get('total_calls'), 'total_calls')),
-                    'todayCalls': int(_strict(d.get('today_calls'), 'today_calls')),
-                    'topModels': [{'model': str(x.get('model') or '?')[:40],
-                                   'spend': float(x['spend']),
-                                   'calls': _row_calls(x.get('calls'))}
-                                  for x in used[:3]]}
-            with _quota_cache_lock:
-                _quota_cache[provider_id] = (now, data)
-            self._send_json(200, data)
-        except Exception as e:
-            msg = str(e)
-            if stale_cache:
-                d2 = dict(stale_cache[1]); d2['cached'] = True
-                self._send_json(200, d2)
-            elif ('imeout' in msg) or ('timed out' in msg):
-                self._send_json(504, {'error': 'NeuroSpark API超时: ' + msg, 'cached': False})
-            else:
-                self._send_json(502, {'error': msg, 'cached': False})
-
-    def _proxy_codex(self, provider_id):
-        """Codex 用量（2026-11-10）：GET chatgpt.com/backend-api/codex/usage（ChatGPT OAuth）。
-        每次现读 ~/.codex/auth.json（令牌自动续期后无需改配置）；缓存/超时fallback同 _proxy_quota（60s TTL+旧缓存兑底）。"""
-        now = time.time()
-        with _quota_cache_lock:
-            c = _quota_cache.get(provider_id)
-            if c and now - c[0] < _QUOTA_CACHE_TTL:
-                self._send_json(200, c[1])
-                return
-            stale_cache = c
-        try:
-            with open(os.path.expanduser('~/.codex/auth.json')) as f:
-                auth = json.load(f)['tokens']
-            tok = auth.get('access_token') or ''
-            acct = auth.get('account_id') or ''
-            if not tok:
-                raise RuntimeError('auth.json无access_token')
-            req = urllib.request.Request(
-                'https://chatgpt.com/backend-api/codex/usage',
-                headers={'Authorization': 'Bearer ' + tok,
-                         'chatgpt-account-id': acct,
-                         'User-Agent': 'codex-cli/0.166.0'})
-            with _PROXY_OPENER.open(req, timeout=10) as resp:
-                raw = json.loads(resp.read())
-            rl = raw.get('rate_limit') or {}
-            pw = rl.get('primary_window') or {}
-            sw = rl.get('secondary_window')
-            if not _codex_valid_pct(pw.get('used_percent')):
-                # R2(1110): 主窗口used_percent非法→fail-closed，不写新缓存（走stale兜底或502）
-                raise ValueError('codex used_percent非法: %r' % (pw.get('used_percent'),))
-            data = {
-                'plan': raw.get('plan_type') or 'unknown',
-                'allowed': rl.get('allowed'),
-                'primaryWindow': {
-                    'usedPercent': pw.get('used_percent'),
-                    'limitWindowSeconds': pw.get('limit_window_seconds'),
-                    'resetAfterSeconds': pw.get('reset_after_seconds'),
-                    'resetAt': pw.get('reset_at'),
-                } if pw else None,
-                'secondaryWindow': ({
-                    'usedPercent': sw.get('used_percent'),
-                    'limitWindowSeconds': sw.get('limit_window_seconds'),
-                    'resetAfterSeconds': sw.get('reset_after_seconds'),
-                    'resetAt': sw.get('reset_at'),
-                } if sw and _codex_valid_pct(sw.get('used_percent')) else None),  # R2(1110): 短窗口非法则丢弃fail-closed，不影响主窗口
-                'hasCredits': (raw.get('credits') or {}).get('has_credits'),
-            }
-            with _quota_cache_lock:
-                _quota_cache[provider_id] = (now, data)
-            self._send_json(200, data)
-        except (urllib.error.URLError, TimeoutError) as e:
-            if stale_cache:
-                d2 = dict(stale_cache[1]); d2['cached'] = True
-                self._send_json(200, d2)
-            else:
-                self._send_json(504, {'error': 'Codex API超时: ' + str(e), 'cached': False})
-        except Exception as e:
-            if stale_cache:
-                d2 = dict(stale_cache[1]); d2['cached'] = True
-                self._send_json(200, d2)
-            else:
-                self._send_json(502, {'error': str(e), 'cached': False})
 
     def do_OPTIONS(self):
         """处理 CORS preflight"""
@@ -2149,7 +1718,8 @@ class H(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         """处理登录表单提交"""
-        if self.path == '/login':
+        req_path = urlsplit(self.path).path
+        if req_path == '/login':
             # 登录频率限制
             client_ip = self.client_address[0]
             if not _check_login_rate_limit(client_ip):
@@ -2209,12 +1779,13 @@ class H(http.server.SimpleHTTPRequestHandler):
         return False
 
     def do_GET(self):
+        req_path = urlsplit(self.path).path
         # /login 页面不需要认证
-        if self.path == '/login':
+        if req_path == '/login':
             _send_login_page(self)
             return
         # /logout 清除Cookie（JWT无状态，不需要服务端清理）
-        if self.path == '/logout':
+        if req_path == '/logout':
             self.send_response(302)
             self.send_header('Location', '/login')
             # R3同口径：隧道访问时清除Cookie也带Secure
@@ -2225,47 +1796,26 @@ class H(http.server.SimpleHTTPRequestHandler):
         # 其他路由需要认证
         if not self._require_auth():
             return
-        if self.path == '/providers':
+        if req_path == '/providers':
             """返回动态 provider 列表（不含 apiKey）"""
             providers = _get_providers()
             safe = [{'id': p['id'], 'label': p['label'], 'baseUrl': p['baseUrl'],
                      'quotaType': p['quotaType']} for p in providers]
-            body = json.dumps(safe).encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path.startswith('/quota/'):
+            self._send_json(200, safe)
+        elif req_path.startswith('/quota/'):
             """动态额度查询: /quota/<provider_id>"""
-            pid = self.path.split('/')[-1]
+            pid = req_path[len('/quota/'):]
             providers = _get_providers()
             p = next((x for x in providers if x['id'] == pid), None)
             if not p:
-                self.send_response(404)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'error': f'Unknown provider: {pid}'}).encode())
+                self._send_json(404, {'error': f'Unknown provider: {pid}'})
                 return
-            if p['quotaType'] == 'runpod_gpu':
-                self._proxy_runpod(p['apiKey'], pid)
-            elif p['quotaType'] == 'tikhub_balance':
-                self._proxy_tikhub(p['apiKey'], pid)
-            elif p['quotaType'] == 'neurospark_usage':
-                self._proxy_neurospark(p['apiKey'], pid)
-            elif p['quotaType'] == 'codex_usage':
-                self._proxy_codex(pid)
-            else:
-                self._proxy_quota(p['quotaApi'], p['apiKey'], pid)
-        elif self.path == '/sessions-json':
+            status, data = _dq_fetch_quota(p, _ANTIGRAVITY_SNAPSHOT_PATH)
+            self._send_json(status, data)
+        elif req_path == '/sessions-json':
             # 使用缓存层，避免每次轮询都 spawn CLI
-            d = _get_cached_sessions()
-            body = json.dumps(d).encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path == '/agent-status':
+            self._send_json(200, _get_cached_sessions())
+        elif req_path == '/agent-status':
             try:
                 d = _get_cached_sessions(nonblocking=True)
                 now = int(time.time() * 1000)
@@ -2341,22 +1891,18 @@ class H(http.server.SimpleHTTPRequestHandler):
                 agents.sort(key=lambda a: agent_order.get(a['agentId'], 99))
                 bg_ready, bg_stale, bg_checked = availability
                 fresh = bool(model_feed['ready'] and not model_feed['stale'] and bg_ready and not bg_stale)
-                body = json.dumps({
+                payload = {
                     'agents': agents, 'now': now, 'wsConnected': model_feed['connected'],
                     'statusFresh': fresh and all(not card['activityStale'] for card in agents),
                     'lastConfirmedAt': min(model_feed['checkedAt'], bg_checked) if model_feed.get('checkedAt') and bg_checked else None,
                     'activeRunAgents': sorted(aid for aid, row in model_feed['agents'].items()
                                               if row['state'] == 'working' and not model_feed['stale']),
                     'gatewayHealth': _gateway_health(), 'hermesHealth': _hermes_health(),
-                }).encode()
+                }
             except Exception as e:
-                body = json.dumps({'error': str(e)}).encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path == '/cron-json':
+                payload = {'error': str(e)}
+            self._send_json(200, payload)
+        elif req_path == '/cron-json':
             data = {
                 'openclawCron': _get_openclaw_cron(),
                 'crontab': _get_crontab(),
@@ -2364,78 +1910,57 @@ class H(http.server.SimpleHTTPRequestHandler):
                 'heartbeats': _get_heartbeats(),
                 'fetchedAt': int(time.time() * 1000),
             }
-            body = json.dumps(data).encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path == '/cron':
+            self._send_json(200, data)
+        elif req_path == '/cron':
             self.path = '/cron.html'
             super().do_GET()
-        elif self.path == '/email-status':
+        elif req_path == '/email-status':
             """邮件监听状态（由 email_monitor.py 定时写入 email_status.json）"""
             try:
-                status_file = os.path.join(os.path.dirname(DIR), 'projects', 'token-dashboard', 'data', 'email_status.json')
-                # email_status.json 实际在 token-dashboard 项目 data 目录下
-                _td_dir = os.path.join(os.path.expanduser('~'), '.openclaw/workspace/ai_workspace/projects/token-dashboard')
-                status_file = os.path.join(_td_dir, 'data', 'email_status.json')
+                status_file = os.path.join(_TD_DATA_DIR, 'email_status.json')
                 if os.path.exists(status_file):
-                    with open(status_file) as f:
+                    with open(status_file, encoding='utf-8') as f:
                         data = json.load(f)
                 else:
                     data = {'unread_count': 0, 'new_count': 0, 'last_check': None, 'recent_new': [], 'note': '尚未运行'}
-                body = json.dumps(data).encode()
             except Exception as e:
-                body = json.dumps({'error': str(e)}).encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path == '/system-tasks':
+                data = {'error': str(e)}
+            self._send_json(200, data)
+        elif req_path == '/system-tasks':
             """系统任务栏数据（非Gateway衍生的定时任务进程，仅看板可见，不进TG推送）"""
             try:
                 with _sys_task_lock:
                     data = {'tasks': _sys_task_latest['tasks'], 'unknown': _sys_task_latest['unknown'],
                             'ts': _sys_task_latest['ts'], 'now': int(time.time() * 1000)}
-                body = json.dumps(data).encode()
             except Exception as e:
-                body = json.dumps({'error': str(e)}).encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', _cors_origin(self))
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path == '/health-json':
-            data = _get_system_health()
-            body = json.dumps(data).encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(body)
+                data = {'error': str(e)}
+            self._send_json(200, data)
+        elif req_path == '/health-json':
+            self._send_json(200, _get_system_health())
         else:
-            if self.path == '/' or self.path == '/token_dashboard.html':
+            if req_path in ('/', '/token_dashboard.html'):
                 # 防止浏览器缓存旧版 HTML（导致 JS 不更新）
                 # 2026-08-20 模板移入项目 templates/ 纳管（脱离 scripts/ 双git夹缝），随项目git版本化
-                html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates', 'token_dashboard.html')
+                html_path = os.path.join(_PROJECT_DIR, 'templates', 'token_dashboard.html')
                 try:
                     with open(html_path, 'rb') as f:
                         content = f.read()
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.send_header('Content-Length', str(len(content)))
                     self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
                     self.send_header('Pragma', 'no-cache')
                     self.send_header('Expires', '0')
                     self.end_headers()
                     self.wfile.write(content)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    logging.debug('client disconnected before HTML response')
                 except Exception as e:
                     self.send_response(500)
                     self.end_headers()
                     self.wfile.write(str(e).encode())
             else:
-                # 静态文件也需要认证
-                if not self._require_auth():
-                    return
+                self.path = req_path
                 super().do_GET()
 
     def log_message(self, *a):
