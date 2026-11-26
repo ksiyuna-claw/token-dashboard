@@ -14,7 +14,17 @@
   .section { margin-bottom: 28px; }
   .section-title { font-size: 14px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
   .provider-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-  @media (max-width: 900px) { .provider-grid { grid-template-columns: 1fr; } }
+  .card-wide { grid-column: span 2; }
+  .ag-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
+  .ag-col { min-width: 0; }
+  .ag-col + .ag-col { border-left: 1px solid rgba(48,54,61,0.55); padding-left: 20px; }
+  .ag-footer-credits { margin-top: 4px; border-top: 1px solid rgba(48,54,61,0.5); }
+  @media (max-width: 900px) {
+    .provider-grid { grid-template-columns: 1fr; }
+    .card-wide { grid-column: auto; }
+    .ag-cols { grid-template-columns: 1fr; }
+    .ag-col + .ag-col { border-left: none; padding-left: 0; border-top: 1px solid rgba(48,54,61,0.5); }
+  }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
   .card .provider-name { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
   .card .provider-sub { font-size: 11px; color: var(--dim); margin-bottom: 12px; }
@@ -484,11 +494,7 @@ function renderModelArea(stat) {
   return `<div class="ac-model"><div class="ac-model-chips">${chips}${staleBadge}</div>${bar}</div>`;
 }
 
-function renderQuotaCard(name, subtitle, limits, opts) {
-  const badgeHtml = (opts && typeof opts === 'object' && opts.badgeHtml) ? String(opts.badgeHtml) : '';
-  const footerHtml = (opts && typeof opts === 'object' && opts.footerHtml) ? String(opts.footerHtml) : '';
-  const actionHtml = (opts && typeof opts === 'object' && opts.actionHtml) ? String(opts.actionHtml) : '';
-  const cardAttrs = (opts && typeof opts === 'object' && opts.cardAttrs) ? (' ' + String(opts.cardAttrs)) : '';
+function renderQuotaRows(limits) {
   let rows = '';
   for (const l of (limits || [])) {
     if (l.type === 'TIME_LIMIT') continue;
@@ -506,20 +512,34 @@ function renderQuotaCard(name, subtitle, limits, opts) {
       </div>`;
     }
   }
+  return rows;
+}
+
+function renderQuotaCard(name, subtitle, limits, opts) {
+  const badgeHtml = (opts && typeof opts === 'object' && opts.badgeHtml) ? String(opts.badgeHtml) : '';
+  const footerHtml = (opts && typeof opts === 'object' && opts.footerHtml) ? String(opts.footerHtml) : '';
+  const actionHtml = (opts && typeof opts === 'object' && opts.actionHtml) ? String(opts.actionHtml) : '';
+  const cardAttrs = (opts && typeof opts === 'object' && opts.cardAttrs) ? (' ' + String(opts.cardAttrs)) : '';
+  const extraClass = (opts && typeof opts === 'object' && opts.extraClass) ? (' ' + mEsc(String(opts.extraClass).trim())) : '';
+  const columns = (opts && typeof opts === 'object' && Array.isArray(opts.columns)) ? opts.columns.map(renderQuotaRows).filter(Boolean) : [];
+  const bodyHtml = columns.length >= 2
+    ? `<div class="ag-cols">${columns.map(col => `<div class="ag-col">${col}</div>`).join('')}</div>`
+    : (columns.length === 1 ? columns[0] : renderQuotaRows(limits));
   const headHtml = actionHtml
     ? `<div class="card-head-row"><div class="provider-name">${mEsc(name)}</div>${actionHtml}</div>`
     : `<div class="provider-name">${mEsc(name)}</div>`;
-  return (rows || footerHtml) ? `<div class="card"${cardAttrs}>${headHtml}<div class="provider-sub">${mEsc(subtitle)}${badgeHtml}</div>${rows}${footerHtml}</div>` : '';
+  return (bodyHtml || footerHtml) ? `<div class="card${extraClass}"${cardAttrs}>${headHtml}<div class="provider-sub">${mEsc(subtitle)}${badgeHtml}</div>${bodyHtml}${footerHtml}</div>` : '';
 }
 
 function renderNoQuota(name, subtitle, note, opts) {
   const actionHtml = (opts && typeof opts === 'object' && opts.actionHtml) ? String(opts.actionHtml) : '';
   const cardAttrs = (opts && typeof opts === 'object' && opts.cardAttrs) ? (' ' + String(opts.cardAttrs)) : '';
   const footerHtml = (opts && typeof opts === 'object' && opts.footerHtml) ? String(opts.footerHtml) : '';
+  const extraClass = (opts && typeof opts === 'object' && opts.extraClass) ? (' ' + mEsc(String(opts.extraClass).trim())) : '';
   const headHtml = actionHtml
     ? `<div class="card-head-row"><div class="provider-name">${mEsc(name)}</div>${actionHtml}</div>`
     : `<div class="provider-name">${mEsc(name)}</div>`;
-  return `<div class="card"${cardAttrs}>${headHtml}<div class="provider-sub">${mEsc(subtitle)}</div><div class="no-quota">${mEsc(note)}</div>${footerHtml}</div>`;
+  return `<div class="card${extraClass}"${cardAttrs}>${headHtml}<div class="provider-sub">${mEsc(subtitle)}</div><div class="no-quota">${mEsc(note)}</div>${footerHtml}</div>`;
 }
 
 let _antigravityProvider = { id: 'antigravity', label: 'Antigravity（Google AI 订阅）', baseUrl: 'https://antigravity.google', quotaType: 'antigravity_quota' };
@@ -531,18 +551,19 @@ function renderAntigravityCard(p, j, feedback) {
   const host = (p && p.baseUrl && (p.baseUrl.split('//')[1] || '').split('/')[0]) || 'antigravity.google';
   const actionHtml = '<button type="button" class="card-refresh-btn" id="btnRefreshAntigravity" onclick="refreshAntigravityQuota()" title="通过官方 agy models 触发实时刷新 Antigravity 套餐余量（零对话消耗）">🔄 刷新</button>';
   const cardAttrs = 'data-provider-card="antigravity"';
+  const extraClass = 'card-wide';
   const feedbackHtml = (feedback && feedback.text)
     ? `<div class="card-refresh-hint" style="color:${mEsc(feedback.color || 'var(--dim)')}">${mEsc(feedback.text)}</div>`
     : '';
 
   if (!j || j.error) {
-    return renderNoQuota(label, host, '获取失败: ' + ((j && j.error) || '返回为空'), { actionHtml, cardAttrs, footerHtml: feedbackHtml });
+    return renderNoQuota(label, host, '获取失败: ' + ((j && j.error) || '返回为空'), { actionHtml, cardAttrs, extraClass, footerHtml: feedbackHtml });
   }
   if (j.available === false) {
-    return renderNoQuota(label, 'Google AI 订阅 · 本地快照', j.hint || '暂无快照 · 在终端打开一次 agy 自动同步', { actionHtml, cardAttrs, footerHtml: feedbackHtml });
+    return renderNoQuota(label, 'Google AI 订阅 · 本地快照', j.hint || '暂无快照 · 在终端打开一次 agy 自动同步', { actionHtml, cardAttrs, extraClass, footerHtml: feedbackHtml });
   }
   if (j.available !== true) {
-    return renderNoQuota(label, host, 'API返回异常', { actionHtml, cardAttrs, footerHtml: feedbackHtml });
+    return renderNoQuota(label, host, 'API返回异常', { actionHtml, cardAttrs, extraClass, footerHtml: feedbackHtml });
   }
 
   const sub = 'Google AI 订阅' + (j.planTier ? ' · ' + j.planTier : '');
@@ -554,18 +575,20 @@ function renderAntigravityCard(p, j, feedback) {
     if (b.disabled === true) hasDisabled = true;
     validBuckets.push(b);
   }
-  const is3pBucket = b => String(b.id || '').toLowerCase().startsWith('3p');
-  const non3pBuckets = validBuckets.filter(b => !is3pBucket(b));
-  const tpBuckets = validBuckets.filter(is3pBucket);
-  const fold3p = non3pBuckets.length > 0 && tpBuckets.length > 0 && tpBuckets.every(b => b.usedPercent === 0 && b.disabled !== true);
-  const displayBuckets = fold3p ? non3pBuckets : validBuckets;
-  const limits = displayBuckets.map(b => ({
+  const toLimit = b => ({
     type: 'TOKENS_LIMIT',
     label: b.label || b.id || '配额',
     unit: Number.isFinite(b.unit) ? b.unit : 0,
     percentage: b.usedPercent,
     nextResetTime: Number.isFinite(b.resetAtMs) ? b.resetAtMs : null
-  }));
+  });
+  const is3pBucket = b => String(b.id || '').toLowerCase().startsWith('3p');
+  const non3pBuckets = validBuckets.filter(b => !is3pBucket(b));
+  const tpBuckets = validBuckets.filter(is3pBucket);
+  const columns = (non3pBuckets.length > 0 && tpBuckets.length > 0)
+    ? [non3pBuckets.map(toLimit), tpBuckets.map(toLimit)]
+    : [];
+  const limits = columns.length ? [] : validBuckets.map(toLimit);
   const ageSec = Number.isFinite(j.ageSec) ? Math.max(0, j.ageSec)
     : (Number.isFinite(j.updatedAt) ? Math.max(0, Math.floor((Date.now() - j.updatedAt) / 1000)) : null);
   let badgeHtml = '';
@@ -583,22 +606,18 @@ function renderAntigravityCard(p, j, feedback) {
   if (hasDisabled) {
     badgeHtml += ' <span class="tag tag-red">额度受限</span>';
   }
-  let footerHtml = '';
-  if (fold3p) {
-    const tpTitle = tpBuckets.map(b => (b.label || b.id) + ': ' + b.usedPercent + '% 已用').join(' · ');
-    footerHtml += '<div class="quota-row" title="' + mEsc(tpTitle) + '"><div class="label">Claude/GPT（5h / 周）</div><div style="font-size:12px;color:var(--green)">0% 已用 · 已恢复</div></div>';
-  }
+  let creditsHtml = '';
   for (const cr of (Array.isArray(j.credits) ? j.credits : [])) {
     if (cr && typeof cr.remainingAmount === 'number' && isFinite(cr.remainingAmount) && cr.remainingAmount >= 0) {
       const amtText = Number.isInteger(cr.remainingAmount) ? String(cr.remainingAmount) : cr.remainingAmount.toFixed(2);
-      footerHtml += '<div class="quota-row"><div><div class="label">' + mEsc(cr.label || 'AI Credits') + '</div></div><div class="value" style="color:var(--blue)">' + mEsc(amtText) + '</div></div>';
+      creditsHtml += '<div class="quota-row"><div><div class="label">' + mEsc(cr.label || 'AI Credits') + '</div></div><div class="value" style="color:var(--blue)">' + mEsc(amtText) + '</div></div>';
     }
   }
-  footerHtml += feedbackHtml;
-  if (!limits.length && !footerHtml) {
-    return renderNoQuota(label, sub, '快照无有效配额数据', { actionHtml, cardAttrs, footerHtml: feedbackHtml });
+  const footerHtml = (creditsHtml ? `<div class="ag-footer-credits">${creditsHtml}</div>` : '') + feedbackHtml;
+  if (!limits.length && !columns.length && !footerHtml) {
+    return renderNoQuota(label, sub, '快照无有效配额数据', { actionHtml, cardAttrs, extraClass, footerHtml: feedbackHtml });
   }
-  return renderQuotaCard(label, sub, limits, { badgeHtml, footerHtml, actionHtml, cardAttrs });
+  return renderQuotaCard(label, sub, limits, { badgeHtml, footerHtml, actionHtml, cardAttrs, extraClass, columns });
 }
 
 async function refreshAntigravityQuota() {

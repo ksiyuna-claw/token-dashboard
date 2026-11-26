@@ -1,6 +1,23 @@
 # Token Dashboard 变更日志
 
+## 2026-11-27
+
+- **📦 模型供应商额度布局优化：Antigravity 升级「跨 2 列双栏宽卡」（水母 🪼，经董事长拍板执行）**：
+  1. **背景与依据**：参照 [11-23 额度板块布局规范](变更说明_20261123_额度板块布局调整.md)（Codex 首、DeepSeek 尾、不硬挤压缩），`Claude/GPT 周额度` 启用后 Antigravity 卡片出现 4 条完整进度条，单列竖排拉高整行且第 3 行右下角留空 1 格。
+  2. **跨 2 列双栏改造**：`templates/token_dashboard.html` 新增 `.card-wide`（`grid-column: span 2`）与 `.ag-cols` 双栏网格（窄屏 `<= 900px` 自动退回单列堆叠）；抽出 `renderQuotaRows()` 复用行渲染逻辑，改造 `renderAntigravityCard()` 固定左列显示 `Gemini`（5h + 周）、右列显示 `Claude/GPT`（5h + 周，不再因 0% 折叠造成高度抖动），8 张卡在桌面端排成齐整的 **3×3 满格**（第 1 行 `Codex + Antigravity 宽卡` 高 `257.5px`、第 2 行 `Kimi + 智谱 + NeuroSpark` 高 `252px`、第 3 行 `RunPod + TikHub + DeepSeek` 高 `165px`）。
+  3. **验证**：`node --check` 与 `py_compile` 通过；`unittest` **50/50** 全量通过（`5.073s`，含 [test_quota_page.py](tests/test_quota_page.py) `card-wide` 与 `.ag-cols` 左右并排断言）；`launchctl kickstart -k` 重载后（PID `5987`），内置浏览器 `1280x900` 实测 8 卡 bounding box 与最终截图齐整无溢出、0 控制台/网络报错。
+  4. **回滚**：`git revert <commit>` 后 `launchctl kickstart -k "gui/$(id -u)/com.openclaw.token-dashboard"`。
+
 ## 2026-11-26
+
+- **联动「虾厂运维系统」P3 切换：云端备份调至 `07:30` 并下线致泰本地备份任务**：
+  1. `_crontab_purpose()` 与 `DEFAULT_SYSTEM_TASKS` 更新 `cloud_backup.sh` 为 `每日07:30`，标注 `openclaw-backup/backup.sh` 已停用并从现役系统任务名单移除（16 项 → 15 项）。
+  2. 更新 `tests/test_dashboard_quota.py` 对应断言并经 `launchctl kickstart -k` 重载生效。
+
+- **联动「虾厂运维系统」整合迁入致泰，修正 `/cron` 标注与系统任务栏名单**：
+  1. **`_crontab_purpose()` 分支修正**：`token_dashboard_server.py` 新增 `cloud_backup.sh` 专用分支（`[虾厂运维] 云端两层备份（GitHub新仓 + 腾讯云COS加密，每天08:20）`），并将原 `backup.sh or zhitai` 宽松匹配收紧为 `openclaw-backup/backup.sh`（标注观察期暂留），修复云端备份和致泰新路径串标为“智泰硬盘全量备份”的问题。
+  2. **`DEFAULT_SYSTEM_TASKS` 全量对齐**：补齐 `虾厂运维·云端两层备份`、`虾厂运维·Gateway定时重启`、`虾厂运维·周日session清理`，收紧 `智泰硬盘全量备份` 匹配规则为 `openclaw-backup/backup.sh`（标注观察期），统一运维条目归属为 `虾厂运维`（共 16 项），同步更新 `README.md`。
+  3. **单测扩展与验证**：`tests/test_dashboard_quota.py` 新增致泰新路径及云端/致泰备份区分断言；`py_compile` 通过，`unittest` **50/50** 全量通过（4.809s）。22:04 经董事长批准执行 `launchctl kickstart -k` 重载生效（PID `85050` → `87188`，`:18888` HTTP 200），实测 `/system-tasks` 16 项、`/cron-json` 21 条零空白用途、`/projects-status?refresh=1` 状态与新归档同步准确。
 
 - **修复 Antigravity「🔄 刷新」竞态未写盘却误报成功且锁死冷却（水母 🪼，经董事长批准执行）**：
   1. **根因**：`~/.gemini/antigravity-cli/log/cli-20261126_001328.log` 实证 `agy models` 会在后台刚发起 `doRefreshQuota` 后 0.8ms 内触发 `Language server shutting down` 退出（`rc=0`）导致 `statusLine` 来不及写盘；旧版 `refresh_antigravity_snapshot()` 只判退出码 `0` 不核对 `updatedAt`，导致界面误报同步成功、锁 15s 冷却却仍显「快照 · 2小时前」。

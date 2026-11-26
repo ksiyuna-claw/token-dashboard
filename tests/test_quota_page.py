@@ -133,6 +133,8 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('暂无快照', cards_text)
             self.assertLess(cards_text.index('Codex'), cards_text.index('Antigravity'))
             self.assertTrue(await page.locator('#btnRefreshAntigravity').is_visible())
+            ag_classes_empty = await page.locator('[data-provider-card="antigravity"]').get_attribute('class')
+            self.assertIn('card-wide', ag_classes_empty or '')
 
             # Verify linxia resolves to 磷虾 and XSS did not execute (cron moved to #page-ops tab)
             self.assertEqual(await page.locator('#summaryGrid').count(), 0)
@@ -197,10 +199,20 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('22.5% 已用', updated_text)
             self.assertIn('Gemini 周额度', updated_text)
             self.assertIn('6.2% 已用', updated_text)
-            self.assertIn('Claude/GPT（5h / 周）', updated_text)
-            self.assertNotIn('Claude/GPT 5小时窗口', updated_text)
+            self.assertIn('Claude/GPT 5小时窗口', updated_text)
+            self.assertIn('Claude/GPT 周额度', updated_text)
             self.assertIn('AI Credits 余额', updated_text)
             self.assertIn('42', updated_text)
+
+            ag_classes = await page.locator('[data-provider-card="antigravity"]').get_attribute('class')
+            self.assertIn('card-wide', ag_classes or '')
+            ag_cols = page.locator('[data-provider-card="antigravity"] .ag-cols .ag-col')
+            self.assertEqual(await ag_cols.count(), 2)
+            col0_box = await ag_cols.nth(0).bounding_box()
+            col1_box = await ag_cols.nth(1).bounding_box()
+            self.assertIsNotNone(col0_box)
+            self.assertIsNotNone(col1_box)
+            self.assertLess(col0_box['x'], col1_box['x'])
 
             # Clicking refresh button triggers POST /quota/antigravity/refresh and updates card in-place
             await page.locator('#btnRefreshAntigravity').click()
