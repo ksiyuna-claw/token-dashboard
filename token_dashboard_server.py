@@ -771,8 +771,10 @@ def _crontab_purpose(full_cmd, line=''):
         return '[虾厂运维] Gateway 定时重启（每天04:00，释放V8堆碎片+session缓存）'
     elif 'cloud_monitor' in full_cmd:
         return '[聚光萤] 云端服务监控（每30分钟，异常时TG告警）'
-    elif 'backup.sh' in full_cmd or 'zhitai' in full_cmd:
-        return '[虾厂运维] 智泰硬盘全量备份（每天 07:30 rsync ~/.openclaw + 公共Skill，成功/失败TG推送）'
+    elif 'cloud_backup.sh' in full_cmd:
+        return '[虾厂运维] 云端两层备份（GitHub新仓 + 腾讯云COS加密，每天07:30）'
+    elif 'openclaw-backup/backup.sh' in full_cmd:
+        return '[虾厂运维] 智泰硬盘全量备份（已停用，由云端两层备份替代）'
     elif 'gateway_log_rotate' in full_cmd:
         return '[虾厂运维] Gateway 日志轮转（每小时25分，防日志膨胀）'
     elif 'du_snapshot' in full_cmd:
@@ -1240,12 +1242,14 @@ _SYS_TASK_STATE_FILE = os.path.join(_TD_DATA_DIR, 'system_tasks_state.json')
 
 # 已知任务名单（现役非Gateway衍生定时脚本与常驻服务）；config.json 的 system_tasks 键可扩展/覆盖
 DEFAULT_SYSTEM_TASKS = [
-    {'name': '服务器巡检·健康巡检', 'owner': '基围虾/运维', 'period': '每15分钟', 'match': ['health_check.py']},
-    {'name': '服务器巡检·日志轮转', 'owner': '基围虾/运维', 'period': '每小时25分', 'match': ['gateway_log_rotate.sh']},
-    {'name': '服务器巡检·cron投递快照', 'owner': '基围虾/运维', 'period': '每15分钟', 'match': ['cron_delivery_snapshot.py']},
-    {'name': '服务器巡检·tmp清理', 'owner': '基围虾/运维', 'period': '每日06:55', 'match': ['clean_workspace_tmp.py']},
-    {'name': '服务器巡检·磁盘du快照', 'owner': '基围虾/运维', 'period': '每日06:55', 'match': ['du_snapshot.py']},
-    {'name': '智泰硬盘全量备份', 'owner': '基围虾/运维', 'period': '每日07:30', 'match': ['openclaw-backup/backup.sh', 'backup.sh']},
+    {'name': '虾厂运维·健康巡检', 'owner': '虾厂运维', 'period': '每15分钟', 'match': ['health_check.py']},
+    {'name': '虾厂运维·日志轮转', 'owner': '虾厂运维', 'period': '每小时25分', 'match': ['gateway_log_rotate.sh']},
+    {'name': '虾厂运维·cron投递快照', 'owner': '虾厂运维', 'period': '每15分钟', 'match': ['cron_delivery_snapshot.py']},
+    {'name': '虾厂运维·tmp清理', 'owner': '虾厂运维', 'period': '每日06:55', 'match': ['clean_workspace_tmp.py']},
+    {'name': '虾厂运维·磁盘du快照', 'owner': '虾厂运维', 'period': '每日06:55', 'match': ['du_snapshot.py']},
+    {'name': '虾厂运维·云端两层备份', 'owner': '虾厂运维', 'period': '每日07:30', 'match': ['cloud_backup.sh', 'cos_sync.py', 'github_repos_backup.py']},
+    {'name': '虾厂运维·Gateway定时重启', 'owner': '虾厂运维', 'period': '每日04:00', 'match': ['gateway_restart.sh']},
+    {'name': '虾厂运维·周日session清理', 'owner': '虾厂运维', 'period': '每周日03:05', 'match': ['prune_session_heads.py']},
     {'name': '邮件监控', 'owner': 'Token看板', 'period': '每30分钟', 'match': ['email_monitor.py']},
     {'name': '聚光萤·云端服务监控', 'owner': '聚光萤/运维', 'period': '每30分钟', 'match': ['cloud_monitor.py']},
     {'name': '聚光萤·站点服务 (18890)', 'owner': '聚光萤', 'period': '常驻（launchd）', 'match': ['聚光萤看板/code/serve_site.py', 'serve_site.py']},

@@ -530,11 +530,18 @@ class ServerRoutingAndHealthTests(unittest.TestCase):
         for job in ('人生规划月报', '会话数据每周维护（sessions cleanup）', '巨猫-每周数据回收（皮皮虾）', '聚光萤五平台日采'):
             self.assertIn(job, server.CRON_PURPOSE)
         self.assertIn('session_heads', server._crontab_purpose('5 3 * * 0 /usr/bin/python3 .../prune_session_heads.py'))
+        self.assertIn('07:30', server._crontab_purpose('30 7 * * * /bin/bash /Volumes/ZHITAI/codex_project/虾厂运维系统/自动守护/scripts/cloud_backup.sh'))
+        self.assertIn('已停用', server._crontab_purpose('30 7 * * * /Volumes/ZHITAI/openclaw-backup/backup.sh'))
+        self.assertIn('健康巡检', server._crontab_purpose('*/15 * * * * /opt/homebrew/bin/python3 /Volumes/ZHITAI/codex_project/虾厂运维系统/自动守护/scripts/health_check.py'))
+        self.assertIn('tmp 目录自动清理', server._crontab_purpose('55 6 * * * /opt/homebrew/bin/python3 /Volumes/ZHITAI/codex_project/虾厂运维系统/自动守护/scripts/clean_workspace_tmp.py'))
         for lbl in ('ai.openclaw.heima-site', 'com.shrimp.zhipu-asr-proxy', 'local.jgy-board-deep-read'):
             self.assertIn(lbl, server.LAUNCH_PURPOSE)
         task_names = {t['name'] for t in server.DEFAULT_SYSTEM_TASKS}
         self.assertNotIn('Twitter KOL监控', task_names)
-        self.assertIn('智泰硬盘全量备份', task_names)
+        self.assertNotIn('智泰硬盘全量备份', task_names)
+        self.assertIn('虾厂运维·云端两层备份', task_names)
+        self.assertIn('虾厂运维·Gateway定时重启', task_names)
+        self.assertIn('虾厂运维·周日session清理', task_names)
         self.assertIn('聚光萤·云端服务监控', task_names)
 
 
