@@ -25,14 +25,14 @@
 | 公网 | https://token-dashboard.crypto-signal.work/ | cloudflared `quant-dashboard` 隧道（与量化看板家族共用，配置在 `~/.cloudflared/config.yml`）。**传输协议=http2（TCP 443）**，2026-10-16 起长期固定：当日家网持续阻断 UDP 7844（QUIC）致整条隧道 530/1033，降级 http2 后恢复且为官方标准处置；**勿切回 quic**（该网络 UDP 长会话不可靠，且显式钉 quic 会关闭自动降级）。根因分析与排障档案：`ai_workspace/tickets/1016-cloudflared隧道修复/` |
 | 手机查数 | TG发「查token」 | 触发 `ai_workspace/scripts/token_usage_push.py` 推送（手动口令模式，无自动调度） |
 
-## 功能全景（3大页卡7大区块+额度告警逻辑，2026-11-26 实测核实）
+## 功能全景（4大页卡7大区块+额度告警逻辑，2026-11-27 实测核实）
 
-页面顶部为 3 个可切换页卡（支持 `#monitor` / `#projects` / `#ops` 与角标异常透传）：**`📊 运营监控`**（默认首页）、**`📂 活跃项目`**、**`⚙️ 运维与任务`**。
+页面顶部为 4 个可切换页卡（支持 `#monitor` / `#quota` / `#projects` / `#ops` 与跨页卡告警角标透传）：**`📊 运营监控`**（默认首页）、**`💳 额度与费用`**、**`📂 活跃项目`**、**`⚙️ 运维与任务`**。
 
 | 区块（所属页卡） | 内容（代码实锤） | 数据源 |
 |------|------|--------|
 | 🦐 虾厂员工（运营监控） | 13 位员工卡片。分别显示本人、分身或后台程序工作、等待审核／云端结果、空闲或状态待确认，保留模型标签+7个tab：主会话/心跳/子代理/Slash/微信Bot/系统/全部 | `/agent-status`（15秒轮询）+ `/sessions-json` |
-| 📦 模型供应商额度（运营监控） | Codex / **Antigravity（2026-11-25上线、11-27 升级跨 2 列双栏宽卡：左 Gemini 5h/周、右 Claude·GPT 5h/周；右上角支持「🔄 刷新」触发零对话 `agy models` 实时同步）** / Kimi / 智谱国内 / NeuroSpark / **Google Gemini（付费 API，2026-11-27 上线：BigQuery 账单导出实时查本月消耗/赠金抵扣/净扣费，等待首份账单时显示蓝标「待首次出账」）** / RunPod / TikHub / DeepSeek（尾位）共 **9 张卡**（12 列网格：`4+8` / `4+4+4` / `3+3+3+3` 齐整满排） | `/providers` 列表 + `/quota/<id>` 由独立模块 `dashboard_quota.py` 统一代理与缓存（60s TTL+旧缓存兜底；BigQuery 为 600s TTL）。Codex=读 `~/.codex/auth.json` 调 ChatGPT 后端；**Antigravity=纯只读 `data/antigravity_quota.json` 本地脱敏快照**；**Google Gemini=仅读 `data/gcp_billing_sa.json`（只读 `BigQuery Data Viewer` + `Job User`）经本地 `cryptography` 签发 JWT 查 `billing_export.gcp_billing_export_v1_*`（零额外软件/CLI）**；RunPod/TikHub=`config.json`；NeuroSpark=`openclaw.json`+`curl_cffi` |
+| 📦 模型供应商额度（独立页卡 `#quota`） | Codex / **Antigravity（跨 2 列双栏宽卡：左 Gemini 5h/周、右 Claude·GPT 5h/周，支持「🔄 刷新」触发零对话 `agy models` 实时同步）** / Kimi / 智谱国内 / NeuroSpark / **Google Gemini（付费 API，半宽卡：BigQuery 账单导出查本月消耗/赠金抵扣/净扣费）** / **腾讯云（聚萤科技，2026-11-27 上线半宽卡：纯只读 CAM 策略查实时现金余额 + 本月实付/成本与产品分项）** / RunPod / TikHub / DeepSeek（尾位）共 **10 张卡**（12 列网格：`4+8` / `4+4+4` / `6+6` / `4+4+4` 齐整满排，页卡角标透传额度危险告警） | `/providers` 列表 + `/quota/<id>` 由独立模块 `dashboard_quota.py` 统一代理与缓存（60s / 300s / 600s TTL+旧缓存兜底）。Codex=读 `~/.codex/auth.json`；**Antigravity=纯只读 `data/antigravity_quota.json`**；**Google Gemini=只读 `data/gcp_billing_sa.json` 经本地 `cryptography` 签 JWT 查 BigQuery**；**腾讯云=读 `config.json` `tencent_billing`（纯只读 `QcloudFinanceBillReadOnlyAccess` + 自定义 `finance:DescribeAccountBalance`，零支付权限）经纯标准库 TC3-HMAC-SHA256 直连 `billing.tencentcloudapi.com`**；RunPod/TikHub=`config.json`；NeuroSpark=`openclaw.json`+`curl_cffi` |
 | 📦 Hermes 网关健康（运营监控） | 进程状态 + 心跳 + watchdog触发记录 + **TG通道状态四态**（connected ✅绿 / retrying（Xs未恢复）黄 / 冻结 ⚠️红告警醒目 / unknown ❓灰）；纯读展示零探测逻辑，四态判定全在后端 | `/agent-status` 的 `hermesHealth`（新增 `tg_state`/`tg_state_age` 字段，15秒轮询）；同源 watchdog v5.2（30min双信号自愈：进程+心跳+TG状态）读 `~/.hermes/gateway_state.json` |
 | 📬 邮箱监控（运营监控） | 未读邮件与今日收件状态；瞬时抖动/重启时保留上次正常数据并 15 秒自动重试，登录过期直报提示 | `email_monitor.py`（系统crontab每30分钟）写 `data/email_status.json` → `/email-status`（2分钟轮询） |
 | 🩺 系统健康（运营监控） | **7 卡片**：CPU / 内存 / Swap / 内置磁盘已用 / **ZHITAI 外置盘（容量与挂载状态）** / 负载 1m5m15m / CDP Chrome（含CDP异常警告条） | `/health-json`（30秒轮询） |
@@ -52,7 +52,7 @@ dashboard_quota.py          ← 供应商发现、60s缓存兜底、各家额度
 dashboard_projects.py       ← 活跃项目 项目状态.md 只读扫盘解析与待审规则计数
 dashboard_activity.py / dashboard_background.py / dashboard_status.py ← 员工工作状态实时采集三件套
 全部端点（14个）：
-  /                          ← 主页面（templates/token_dashboard.html，含「📊 运营监控」「📂 活跃项目」「⚙️ 运维与任务」3页卡）
+  /                          ← 主页面（templates/token_dashboard.html，含「📊 运营监控」「💳 额度与费用」「📂 活跃项目」「⚙️ 运维与任务」4页卡）
   /cron                      ← 独立定时任务总览页（cron.html）
   /login /logout             ← 登录/登出（公网访问鉴权）
   /agent-status              ← 虾厂员工状态（15秒轮询）

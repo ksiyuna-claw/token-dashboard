@@ -1,6 +1,8 @@
 """Provider quota discovery, caching, and upstream/local snapshot adapters."""
 import base64
 import datetime
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -16,6 +18,7 @@ from urllib.parse import quote, urlencode
 QUOTA_CACHE_TTL = 60
 GCP_BILLING_CACHE_TTL = 600
 GCP_BILLING_DEFAULT_DATASET = 'billing_export'
+TENCENT_BILLING_CACHE_TTL = 300
 ANTIGRAVITY_REFRESH_COOLDOWN = 15
 ANTIGRAVITY_REFRESH_TIMEOUT = 15
 ANTIGRAVITY_REFRESH_MAX_ATTEMPTS = 3
@@ -28,6 +31,7 @@ _PROXY_HANDLER = urllib.request.ProxyHandler({
     'https': 'http://127.0.0.1:7890',
 })
 _PROXY_OPENER = urllib.request.build_opener(_PROXY_HANDLER)
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 PROVIDER_QUOTA_API = {
     'open.bigmodel.cn': ('https://open.bigmodel.cn/api/monitor/usage/quota/limit', 'zhipu_quota'),
@@ -105,6 +109,7 @@ class QuotaCache:
 
 _DEFAULT_CACHE = QuotaCache()
 _GCP_BILLING_CACHE = QuotaCache(ttl_seconds=GCP_BILLING_CACHE_TTL)
+_TENCENT_BILLING_CACHE = QuotaCache(ttl_seconds=TENCENT_BILLING_CACHE_TTL)
 
 
 def load_project_config(project_dir):
@@ -189,6 +194,21 @@ def get_providers(
                 'quotaType': 'gcp_billing',
                 'saPath': gcp_sa_path,
                 'dataset': str(gcp_dataset),
+            })
+
+        tc_cfg = proj_cfg.get('tencent_billing') if isinstance(proj_cfg.get('tencent_billing'), dict) else {}
+        tc_sid = tc_cfg.get('secret_id') or ''
+        tc_skey = tc_cfg.get('secret_key') or ''
+        if isinstance(tc_sid, str) and len(tc_sid) >= 10 and isinstance(tc_skey, str) and len(tc_skey) >= 10:
+            result.append({
+                'id': 'tencent_billing',
+                'label': '腾讯云（聚萤科技）',
+                'baseUrl': 'https://console.cloud.tencent.com/expense',
+                'apiKey': 'tc3-credentials',
+                'quotaApi': 'https://billing.tencentcloudapi.com',
+                'quotaType': 'tencent_billing',
+                'secretId': tc_sid,
+                'secretKey': tc_skey,
             })
 
         rp_key = proj_cfg.get('runpod_key', '')
@@ -905,6 +925,172 @@ def fetch_gcp_billing(
     return cache.get_or_fetch(provider_id, _fetch, timeout_label='Google BigQuery API')
 
 
+def _to_finite_float(value, default=0.0):
+    try:
+        num = float(value) if value is not None else default
+        return num if math.isfinite(num) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _tencent_tc3_request(
+    action,
+    payload_dict,
+    secret_id,
+    secret_key,
+    version='2018-07-09',
+    opener=_DIRECT_OPENER,
+    now_fn=time.time,
+):
+    """Send a TC3-HMAC-SHA256 signed POST request to billing.tencentcloudapi.com."""
+    host = 'billing.tencentcloudapi.com'
+    service = 'billing'
+    payload = json.dumps(payload_dict, separators=(',', ':'))
+    ts = int(now_fn())
+    date = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime('%Y-%m-%d')
+
+    ct = 'application/json; charset=utf-8'
+    canonical_headers = f'content-type:{ct}\nhost:{host}\nx-tc-action:{action.lower()}\n'
+    signed_headers = 'content-type;host;x-tc-action'
+    hashed_payload = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+    canonical_req = f'POST\n/\n\n{canonical_headers}\n{signed_headers}\n{hashed_payload}'
+    cred_scope = f'{date}/{service}/tc3_request'
+    str_to_sign = f'TC3-HMAC-SHA256\n{ts}\n{cred_scope}\n{hashlib.sha256(canonical_req.encode("utf-8")).hexdigest()}'
+
+    def _sign(key_bytes, msg):
+        return hmac.new(key_bytes, msg.encode('utf-8'), hashlib.sha256).digest()
+
+    k_date = _sign(('TC3' + secret_key).encode('utf-8'), date)
+    k_service = _sign(k_date, service)
+    k_signing = _sign(k_service, 'tc3_request')
+    sig = hmac.new(k_signing, str_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+    auth = f'TC3-HMAC-SHA256 Credential={secret_id}/{cred_scope}, SignedHeaders={signed_headers}, Signature={sig}'
+
+    req = urllib.request.Request(
+        f'https://{host}',
+        data=payload.encode('utf-8'),
+        headers={
+            'Authorization': auth,
+            'Content-Type': ct,
+            'Host': host,
+            'X-TC-Action': action,
+            'X-TC-Timestamp': str(ts),
+            'X-TC-Version': version,
+        },
+        method='POST',
+    )
+    with opener.open(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    return (data.get('Response') if isinstance(data, dict) else {}) or {}
+
+
+def fetch_tencent_billing(
+    secret_id,
+    secret_key,
+    provider_id='tencent_billing',
+    cache=_TENCENT_BILLING_CACHE,
+    opener=_DIRECT_OPENER,
+    now_fn=time.time,
+):
+    """Query Tencent Cloud read-only account balance and current-month billing/cost summary."""
+    if not secret_id or not secret_key:
+        return 502, {'error': '未配置腾讯云只读凭证', 'cached': False}
+
+    def _fetch():
+        tz_sh = datetime.timezone(datetime.timedelta(hours=8))
+        now_dt = datetime.datetime.fromtimestamp(now_fn(), tz_sh)
+        month = now_dt.strftime('%Y-%m')
+        begin_date = now_dt.strftime('%Y-%m-01')
+        end_date = now_dt.strftime('%Y-%m-%d')
+
+        bill_resp = _tencent_tc3_request(
+            'DescribeBillSummaryByProduct',
+            {'BeginTime': month, 'EndTime': month},
+            secret_id,
+            secret_key,
+            opener=opener,
+            now_fn=now_fn,
+        )
+        if 'Error' in bill_resp:
+            err = bill_resp['Error'] or {}
+            raise RuntimeError(f"腾讯云账单接口错误: {err.get('Code', '')} {err.get('Message', '')}".strip())
+
+        bill_total = bill_resp.get('SummaryTotal') or {}
+        month_real_bill = round(_to_finite_float(bill_total.get('RealTotalCost')), 2)
+        month_cash_bill = round(_to_finite_float(bill_total.get('CashPayAmount')), 2)
+        month_voucher_bill = round(_to_finite_float(bill_total.get('VoucherPayAmount')), 2)
+
+        cost_resp = _tencent_tc3_request(
+            'DescribeCostSummaryByProduct',
+            {'BeginTime': begin_date, 'EndTime': end_date, 'Limit': 20, 'Offset': 0},
+            secret_id,
+            secret_key,
+            opener=opener,
+            now_fn=now_fn,
+        )
+        if 'Error' in cost_resp:
+            err = cost_resp['Error'] or {}
+            raise RuntimeError(f"腾讯云成本接口错误: {err.get('Code', '')} {err.get('Message', '')}".strip())
+
+        cost_total = cost_resp.get('Total') or {}
+        month_cost = round(_to_finite_float(cost_total.get('RealTotalCost')), 2)
+        products = []
+        for item in (cost_resp.get('Data') or []):
+            if not isinstance(item, dict):
+                continue
+            cval = round(_to_finite_float(item.get('RealTotalCost')), 2)
+            if cval <= 0:
+                continue
+            pname = str(item.get('BusinessCodeName') or item.get('BusinessCode') or '').strip()[:30]
+            if pname:
+                products.append({'name': pname, 'cost': cval})
+        products.sort(key=lambda x: -x['cost'])
+        products = products[:3]
+
+        balance_ok = False
+        balance_cny = None
+        freeze_cny = 0.0
+        owe_cny = 0.0
+        try:
+            bal_resp = _tencent_tc3_request(
+                'DescribeAccountBalance',
+                {},
+                secret_id,
+                secret_key,
+                opener=opener,
+                now_fn=now_fn,
+            )
+            if 'Error' not in bal_resp:
+                raw_bal = bal_resp.get('RealBalance')
+                if not is_finite_number(raw_bal):
+                    raw_bal = bal_resp.get('CashAccountBalance')
+                if not is_finite_number(raw_bal):
+                    raw_bal = bal_resp.get('Balance')
+                if is_finite_number(raw_bal):
+                    balance_ok = True
+                    balance_cny = round(float(raw_bal) / 100.0, 2)
+                    freeze_cny = round(_to_finite_float(bal_resp.get('FreezeAmount')) / 100.0, 2)
+                    owe_cny = round(_to_finite_float(bal_resp.get('OweAmount')) / 100.0, 2)
+        except Exception:
+            balance_ok = False
+
+        return {
+            'available': True,
+            'month': month,
+            'balanceAvailable': balance_ok,
+            'balanceCny': balance_cny,
+            'freezeCny': freeze_cny,
+            'oweCny': owe_cny,
+            'monthRealBill': month_real_bill,
+            'monthCashBill': month_cash_bill,
+            'monthVoucherBill': month_voucher_bill,
+            'monthCost': month_cost,
+            'products': products,
+        }
+
+    return cache.get_or_fetch(provider_id, _fetch, timeout_label='腾讯云计费 API')
+
+
 def fetch_quota(provider, antigravity_snapshot_path, codex_auth_path=None, cache=_DEFAULT_CACHE):
     """Dispatch quota query by provider quotaType."""
     qtype = provider.get('quotaType')
@@ -916,6 +1102,12 @@ def fetch_quota(provider, antigravity_snapshot_path, codex_auth_path=None, cache
             provider['saPath'],
             provider_id=pid,
             dataset=provider.get('dataset') or GCP_BILLING_DEFAULT_DATASET,
+        )
+    if qtype == 'tencent_billing':
+        return fetch_tencent_billing(
+            provider['secretId'],
+            provider['secretKey'],
+            provider_id=pid,
         )
     if qtype == 'runpod_gpu':
         return fetch_runpod(provider['apiKey'], pid, cache=cache)

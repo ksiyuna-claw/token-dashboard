@@ -16,6 +16,7 @@
   .provider-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
   .provider-grid > .card { grid-column: span 4; min-width: 0; }
   .provider-grid > .card.card-wide { grid-column: span 8; }
+  .provider-grid > .card.card-half { grid-column: span 6; }
   .provider-grid > .card.card-quarter { grid-column: span 3; }
   .ag-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
   .ag-col { min-width: 0; }
@@ -23,7 +24,7 @@
   .ag-footer-credits { margin-top: 4px; border-top: 1px solid rgba(48,54,61,0.5); }
   @media (max-width: 900px) {
     .provider-grid { grid-template-columns: 1fr; }
-    .provider-grid > .card, .provider-grid > .card.card-wide, .provider-grid > .card.card-quarter { grid-column: auto; }
+    .provider-grid > .card, .provider-grid > .card.card-wide, .provider-grid > .card.card-half, .provider-grid > .card.card-quarter { grid-column: auto; }
     .ag-cols { grid-template-columns: 1fr; }
     .ag-col + .ag-col { border-left: none; padding-left: 0; border-top: 1px solid rgba(48,54,61,0.5); }
   }
@@ -195,6 +196,7 @@
 
 <div class="page-tabs" id="pageTabs" role="tablist">
   <button type="button" class="page-tab active" data-page="monitor" role="tab" aria-selected="true" onclick="switchPageTab('monitor')">📊 运营监控</button>
+  <button type="button" class="page-tab" data-page="quota" role="tab" aria-selected="false" onclick="switchPageTab('quota')">💳 额度与费用<span class="tab-badge" id="pageBadgeQuota">…</span></button>
   <button type="button" class="page-tab" data-page="projects" role="tab" aria-selected="false" onclick="switchPageTab('projects')">📂 活跃项目<span class="tab-badge" id="pageBadgeProjects">0</span></button>
   <button type="button" class="page-tab" data-page="ops" role="tab" aria-selected="false" onclick="switchPageTab('ops')">⚙️ 运维与任务<span class="tab-badge" id="pageBadgeOps">…</span></button>
 </div>
@@ -213,11 +215,6 @@
     <span id="sessionCount" style="font-size:11px;color:var(--dim);margin-left:auto;align-self:center"></span>
   </div>
   <div class="agent-card-grid" id="agentCardGrid"><div class="loading">正在获取...</div></div>
-</div>
-
-<div class="section">
-  <div class="section-title">📦 模型供应商额度</div>
-  <div class="provider-grid" id="providerGrid"><div class="loading">正在获取...</div></div>
 </div>
 
 <div class="section" id="hermesSection">
@@ -245,6 +242,13 @@
 </div>
 </div>
 
+<div class="page-panel hidden" id="page-quota">
+<div class="section" id="quotaSection">
+  <div class="section-title">📦 模型供应商额度</div>
+  <div class="provider-grid" id="providerGrid"><div class="loading">正在获取...</div></div>
+</div>
+</div>
+
 <div class="page-panel hidden" id="page-ops">
 <div class="section" id="cronSection">
   <div class="section-title">⏱ 定时任务</div>
@@ -266,7 +270,7 @@
   <tr><td>📊 运营监控</td><td>每15秒</td><td>虾厂工作状态轮询（不消耗token）</td></tr>
   <tr><td>📊 运营监控</td><td>每30秒</td><td>系统健康（含 ZHITAI 外置盘）数据轮询</td></tr>
   <tr><td>📊 运营监控</td><td>每2分钟 / 失败15秒重试</td><td>邮箱监控状态轮询（保留上次正常显示）</td></tr>
-  <tr><td>📊 运营监控</td><td>每5分钟 + 手动刷新</td><td>模型供应商额度轮询（Antigravity 支持按钮零对话实时同步）</td></tr>
+  <tr><td>💳 额度与费用</td><td>每5分钟 + 手动刷新</td><td>模型供应商额度与 Google BigQuery 账单（10分钟缓存；Antigravity 支持按钮零对话实时同步）</td></tr>
   <tr><td>📂 活跃项目</td><td>每2分钟 + 手动扫盘</td><td>活跃项目 项目状态.md 只读扫盘（支持 ?refresh=1 即时重扫）</td></tr>
   <tr><td>⚙️ 运维与任务</td><td>每5分钟 / 每15秒</td><td>定时任务四层（5分钟）+ 系统任务进程（15秒）</td></tr>
   </tbody></table></div></div>
@@ -388,7 +392,8 @@ const STATUS_CLS   = {bright_safe:'tag-blue', safe:'tag-green', warn:'tag-yellow
 function quotaColor(usedPct, nextReset, unit) { return STATUS_COLOR[getQuotaStatus(usedPct, nextReset, unit)]; }
 function quotaTag(usedPct, nextReset, unit) {
   const s = getQuotaStatus(usedPct, nextReset, unit);
-  return `<span class="tag ${STATUS_CLS[s]}">${STATUS_TAG[s]}</span>`;
+  const dangerAttr = (s === 'danger' || s === 'stopped') ? ' data-quota-danger="1"' : '';
+  return `<span class="tag ${STATUS_CLS[s]}"${dangerAttr}>${STATUS_TAG[s]}</span>`;
 }
 function pctColor(p) { return STATUS_COLOR[getQuotaStatus(p, null, null)]; }
 function providerTag(p) {
@@ -659,6 +664,7 @@ async function refreshAntigravityQuota() {
     const cardEl = document.querySelector('[data-provider-card="antigravity"]');
     if (cardEl) {
       cardEl.outerHTML = renderAntigravityCard(_antigravityProvider, j, feedback);
+      updateQuotaPageBadge();
     }
   } catch (e) {
     const cardEl = document.querySelector('[data-provider-card="antigravity"]');
@@ -682,6 +688,22 @@ async function refreshAntigravityQuota() {
   }
 }
 
+function updateQuotaPageBadge(totalProviders) {
+  const badge = document.getElementById('pageBadgeQuota');
+  if (!badge) return;
+  const grid = document.getElementById('providerGrid');
+  const dangerN = grid ? grid.querySelectorAll('[data-quota-danger="1"]').length : 0;
+  if (dangerN > 0) {
+    badge.textContent = '⚠️' + dangerN;
+    badge.style.background = 'rgba(248,81,73,0.22)';
+    badge.style.color = 'var(--red)';
+  } else {
+    badge.textContent = Number.isFinite(totalProviders) ? String(totalProviders) : String(grid ? grid.querySelectorAll('.card').length : 0);
+    badge.style.background = '';
+    badge.style.color = '';
+  }
+}
+
 let _quotaRetryTimer = null;  // P0(2026-10-22): 额度板块失败后的30秒快速重试定时器
 function scheduleQuotaRetry() {
   // Y1(2026-10-28 R1审): 统一重试入口——单provider rejected/返回error也要触发，不限于整体catch
@@ -691,6 +713,7 @@ function scheduleQuotaRetry() {
 }
 async function fetchProviderQuotas() {
   const cards = [];
+  let providerCount = null;
   try {
     // 动态获取 provider 列表
     const pr = await fetch('/providers');
@@ -700,6 +723,7 @@ async function fetchProviderQuotas() {
     if (!pr.ok || !(pr.headers.get('content-type')||'').includes('json')) throw new Error('网络抖动(HTTP ' + pr.status + ')，稍后自动重试');
     const providers = await pr.json();
     if (providers.error) throw new Error(providers.error);
+    providerCount = Array.isArray(providers) ? providers.length : null;
     // 并发请求每个 provider 的额度
     const results = await Promise.allSettled(
       providers.map(async p => {
@@ -710,12 +734,19 @@ async function fetchProviderQuotas() {
       })
     );
     let quotaAnyFailed = false;
+    const cloudTierIds = new Set(['google_billing', 'tencent_billing']);
+    const hasBothCloud = providers.filter(x => cloudTierIds.has(x.id)).length === 2;
     const bottomTierIds = new Set(['google_billing', 'runpod', 'tikhub', 'deepseek']);
-    const useQuarterRow = providers.filter(x => bottomTierIds.has(x.id)).length === 4;
+    const useQuarterRow = !hasBothCloud && providers.filter(x => bottomTierIds.has(x.id)).length === 4;
+    const layoutClassFor = p => {
+      if (hasBothCloud && cloudTierIds.has(p.id)) return 'card-half';
+      if (useQuarterRow && bottomTierIds.has(p.id)) return 'card-quarter';
+      return '';
+    };
     for (let i = 0; i < results.length; i++) {
       const res = results[i];
       const p = providers[i];
-      const qCls = (useQuarterRow && bottomTierIds.has(p.id)) ? 'card-quarter' : '';
+      const qCls = layoutClassFor(p);
       const clsAttr = qCls ? (' ' + qCls) : '';
       if (res.status !== 'fulfilled') {
         quotaAnyFailed = true;
@@ -838,6 +869,51 @@ async function fetchProviderQuotas() {
         } else {
           cards.push(renderNoQuota(p.label, dsLabel, 'API返回异常', { extraClass: qCls }));
         }
+      } else if (p.quotaType === 'tencent_billing') {
+        const subLabel = '费用中心 · ' + ((j && j.month) ? j.month : '本月账单');
+        if (j.error) {
+          cards.push(renderNoQuota(p.label, subLabel, '获取失败: ' + j.error, { extraClass: qCls }));
+        } else if (j.available === true) {
+          const hasBal = j.balanceAvailable === true && typeof j.balanceCny === 'number' && isFinite(j.balanceCny);
+          const monthCost = Number(j.monthCost);
+          const monthReal = Number(j.monthRealBill);
+          const oweCny = Number(j.oweCny || 0);
+          const prodList = Array.isArray(j.products) ? j.products : [];
+          const prodStr = prodList.filter(x => x && x.name && isFinite(Number(x.cost)) && Number(x.cost) > 0)
+            .slice(0, 2)
+            .map(x => String(x.name) + ' ¥' + Number(x.cost).toFixed(2))
+            .join(' · ');
+          if (hasBal) {
+            const balVal = Number(j.balanceCny);
+            const valColor = oweCny > 0 ? 'var(--red)' : (balVal <= 0 ? 'var(--yellow)' : 'var(--green)');
+            const billLine = '本月实付 ¥' + (isFinite(monthReal) ? monthReal.toFixed(2) : '0.00') + ' · 本月成本 ¥' + (isFinite(monthCost) ? monthCost.toFixed(2) : '0.00');
+            const detailLine = prodStr ? (billLine + '（' + prodStr + '）') : billLine;
+            const balTag = oweCny > 0
+              ? '<span class="tag tag-red">已欠费 ¥' + mEsc(oweCny.toFixed(2)) + '</span>'
+              : '<span class="tag tag-green">余额实时</span>';
+            cards.push('<div class="card' + clsAttr + '" data-provider-card="tencent_billing">' +
+              '<div class="provider-name">' + mEsc(p.label) + '</div>' +
+              '<div class="provider-sub">' + mEsc(subLabel) + '</div>' +
+              '<div class="quota-row"><div><div class="label">账户余额（CNY）</div></div><div class="value" style="color:' + valColor + '">¥' + mEsc(balVal.toFixed(2)) + '</div></div>' +
+              '<div class="quota-row" style="padding:2px 0"><div style="font-size:10px;color:var(--dim)">' + mEsc(detailLine) + '</div></div>' +
+              '<div class="quota-row" style="border:none"><div></div>' + balTag + '</div></div>');
+          } else {
+            const costVal = isFinite(monthCost) ? monthCost : 0;
+            const realStr = '本月实付 ¥' + (isFinite(monthReal) ? monthReal.toFixed(2) : '0.00');
+            const detailLine = prodStr ? (realStr + ' · ' + prodStr) : realStr;
+            const costTag = (isFinite(monthReal) && monthReal > 0)
+              ? '<span class="tag tag-blue">本月有实付</span>'
+              : '<span class="tag tag-green">纯只读账单</span>';
+            cards.push('<div class="card' + clsAttr + '" data-provider-card="tencent_billing">' +
+              '<div class="provider-name">' + mEsc(p.label) + '</div>' +
+              '<div class="provider-sub">' + mEsc(subLabel) + '</div>' +
+              '<div class="quota-row"><div><div class="label">本月成本（CNY）</div></div><div class="value" style="color:var(--green)">¥' + mEsc(costVal.toFixed(2)) + '</div></div>' +
+              '<div class="quota-row" style="padding:2px 0"><div style="font-size:10px;color:var(--dim)">' + mEsc(detailLine) + '</div></div>' +
+              '<div class="quota-row" style="border:none"><div></div>' + costTag + '</div></div>');
+          }
+        } else {
+          cards.push(renderNoQuota(p.label, subLabel, 'API返回异常', { extraClass: qCls }));
+        }
       } else if (p.quotaType === 'runpod_gpu') {
         if (j.balance !== undefined) {
           const bal = parseFloat(j.balance).toFixed(2);
@@ -949,6 +1025,7 @@ async function fetchProviderQuotas() {
     scheduleQuotaRetry();
   }
   document.getElementById('providerGrid').innerHTML = cards.join('');
+  updateQuotaPageBadge(providerCount);
 }
 
 let _allSessions = [];
@@ -1705,22 +1782,21 @@ async function fetchSystemTasks() {
   }
 }
 
-// ===== 顶层页面页卡切换（2026-11-25 运营监控 / 活跃项目 / 运维与任务）=====
+// ===== 顶层页面页卡切换（2026-11-27 运营监控 / 额度与费用 / 活跃项目 / 运维与任务）=====
+const VALID_PAGE_TABS = new Set(['monitor', 'quota', 'projects', 'ops']);
 let _activePageTab = 'monitor';
 function switchPageTab(pageName, opts) {
-  const target = (pageName === 'projects' || pageName === 'ops') ? pageName : 'monitor';
+  const target = VALID_PAGE_TABS.has(pageName) ? pageName : 'monitor';
   _activePageTab = target;
   document.querySelectorAll('#pageTabs .page-tab').forEach(btn => {
     const on = btn.dataset.page === target;
     btn.classList.toggle('active', on);
     btn.setAttribute('aria-selected', on ? 'true' : 'false');
   });
-  const monEl = document.getElementById('page-monitor');
-  const projEl = document.getElementById('page-projects');
-  const opsEl = document.getElementById('page-ops');
-  if (monEl) monEl.classList.toggle('hidden', target !== 'monitor');
-  if (projEl) projEl.classList.toggle('hidden', target !== 'projects');
-  if (opsEl) opsEl.classList.toggle('hidden', target !== 'ops');
+  VALID_PAGE_TABS.forEach(name => {
+    const el = document.getElementById('page-' + name);
+    if (el) el.classList.toggle('hidden', target !== name);
+  });
   if (!(opts && opts.skipHash)) {
     const nextHash = '#' + target;
     if (window.location.hash !== nextHash) {
@@ -1733,7 +1809,7 @@ function switchPageTab(pageName, opts) {
 }
 window.addEventListener('hashchange', () => {
   const h = window.location.hash.replace('#', '');
-  switchPageTab((h === 'projects' || h === 'ops') ? h : 'monitor', { skipHash: true });
+  switchPageTab(VALID_PAGE_TABS.has(h) ? h : 'monitor', { skipHash: true });
 });
 
 // ===== 活跃项目进度模块（2026-11-25 只读扫盘）=====
@@ -1885,7 +1961,7 @@ async function fetchProjectsStatus(forceRefresh) {
   }
 }
 
-if (window.location.hash === '#projects' || window.location.hash === '#ops') {
+if (VALID_PAGE_TABS.has(window.location.hash.slice(1))) {
   switchPageTab(window.location.hash.slice(1), { skipHash: true });
 }
 

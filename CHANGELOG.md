@@ -2,6 +2,13 @@
 
 ## 2026-11-27
 
+- **拆出「💳 额度与费用」独立页卡（4 页卡架构）+ 接入腾讯云纯只读实时余额/账单与 10 卡全满排（水母 🪼，经董事长授权执行）**：
+  1. **顶层 4 页卡拆分（`templates/token_dashboard.html`）**：将「📦 模型供应商额度」从 `📊 运营监控` 独立迁出至第 2 页卡 **`💳 额度与费用`**（`#quota`），形成 `📊 运营监控` / `💳 额度与费用` / `📂 活跃项目` / `⚙️ 运维与任务` 4 页卡体系；新增跨页卡角标 `#pageBadgeQuota`，自动透传 `danger` / `stopped` 额度告警数（`⚠️N`，不因 DeepSeek 0 元误报红）。
+  2. **腾讯云纯只读子用户与零依赖 TC3 适配器（`dashboard_quota.py`）**：在腾讯云 CAM 新建仅「编程访问」子用户 `token-dashboard-billing-ro`，仅绑只读预设 `QcloudFinanceBillReadOnlyAccess` 与纯只读自定义策略 `TokenDashboardBalanceReadOnly`（仅 `finance:DescribeAccountBalance`，**零 `finance:trade` 支付权限**）；密钥写入 `.gitignore` 屏蔽的 `config.json`（`chmod 600`）。后端以纯 Python 标准库 TC3-HMAC-SHA256 实现 `fetch_tencent_billing()`（300s 缓存 + 旧缓存兜底，国内直连不走代理），同步抓实时现金余额（分转元）、本月实付账单、本月成本及 Top 产品分项（余额无权限时亦优雅降级只读账单）。
+  3. **10 卡 12 列 4 行齐整满排**：新增 `.card-half`（`span 6`），当 `google_billing` 与 `tencent_billing` 并存时自动组成第 3 行 `6+6` 云账单双卡，底行 `RunPod + TikHub + DeepSeek` 回归 `4+4+4` 三卡齐底（4 行全 12/12 满格，窄屏 `<= 900px` 自动单列）。
+  4. **验证**：`py_compile` + `node --check` 通过；`unittest` **57/57** 全量通过（`7.092s`，含新建 [test_tencent_billing.py](tests/test_tencent_billing.py) 与 [test_quota_page.py](tests/test_quota_page.py) 10 卡布局/两态/XSS 测试）；重载服务（PID `49914`）后 `curl /providers`（10 家、无密钥泄露）与 `/quota/tencent_billing`（HTTP 200，`balanceCny=35.3`、`monthCost=12.98`）通过；Headless Chrome（Playwright）实测 live `http://127.0.0.1:18888/` 全 10 卡几何位置齐整（第 3 行 Google Gemini 首张 BigQuery 表亦已自动就位显 `$0.00 赠金覆盖`，腾讯云显 `¥35.30 余额实时`，两卡同宽 `523px` 同高 `184px`）、无横向溢出、0 页面报错。
+  5. **回滚**：移除 `config.json` 的 `tencent_billing` 键或 `git revert <commit>` 后 `launchctl kickstart -k "gui/$(id -u)/com.openclaw.token-dashboard"`。
+
 - **接入 Google Gemini（付费 API）BigQuery 账单卡片 + 供应商 12 列网格齐整排版（水母 🪼，经董事长授权执行）**：
   1. **只读秘钥落盘与隔离**：将 GCP 控制台生成的最小权限只读服务账号秘钥规范重命名为 `data/gcp_billing_sa.json`（`chmod 600`），核验 `.gitignore`（`data/`）屏蔽不入库。
   2. **零新增依赖 BigQuery 适配器（`dashboard_quota.py`）**：复用本机既有 `cryptography` + 标准库直签 RS256 JWT 获取 `bigquery.readonly` 短时 token（经本地代理访问），新增 `fetch_gcp_billing()`（600s 缓存 + 旧缓存兜底）与 `get_providers()` 自动发现（支持 `config.json` 可选 `gcp_billing.sa_path`/`dataset` 覆盖）。无账单表时返回 `waiting_first_export`（HTTP 200）；出账后自动聚合本月原价消耗、赠金抵扣（`monthCredits`）、净扣费及今日消耗。

@@ -127,6 +127,11 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
 
         async with quota_page(providers, quotas, cron_payload=cron_payload, refresh_handler=handle_refresh) as page:
             page.on('pageerror', lambda err: errors.append(str(err)))
+            self.assertTrue(await page.locator('#page-monitor').is_visible())
+            self.assertFalse(await page.locator('#page-quota').is_visible())
+            await page.locator('#pageTabs button[data-page="quota"]').click()
+            self.assertTrue(await page.locator('#page-quota').is_visible())
+            self.assertFalse(await page.locator('#page-monitor').is_visible())
             await page.wait_for_function("document.querySelectorAll('#providerGrid .card').length === 2")
             cards_text = await page.locator('#providerGrid').inner_text()
             self.assertIn('Antigravity（Google AI 订阅）', cards_text)
@@ -144,7 +149,7 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             cron_text = await page.locator('#cronOpenclawBody').inner_text()
             self.assertIn('磷虾', cron_text)
             self.assertIsNone(await page.evaluate('window.__xss'))
-            await page.locator('#pageTabs button[data-page="monitor"]').click()
+            await page.locator('#pageTabs button[data-page="quota"]').click()
 
             # Switch Antigravity mock to full snapshot with buckets + credits + freshness tag
             snap_ts = int(time.time() * 1000) - 180_000
@@ -281,7 +286,9 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
         errors = []
         async with quota_page(providers, quotas) as page:
             page.on('pageerror', lambda err: errors.append(str(err)))
+            await page.locator('#pageTabs button[data-page="quota"]').click()
             await page.wait_for_function("document.querySelectorAll('#providerGrid .card').length === 9")
+            self.assertIn('⚠️', await page.locator('#pageBadgeQuota').inner_text())
             grid_text = await page.locator('#providerGrid').inner_text()
             self.assertIn('Google Gemini（付费 API）', grid_text)
             self.assertIn('待首次出账', grid_text)
@@ -315,6 +322,86 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('赠金抵扣 ¥320.50', paid_text)
             self.assertIn('今日 ¥12.30', paid_text)
             self.assertIn('赠金覆盖', paid_text)
+            self.assertEqual(errors, [])
+
+    async def test_ten_card_layout_with_tencent_billing_balance_and_readonly_fallback(self):
+        providers = [
+            {'id': 'codex', 'label': 'Codex（ChatGPT订阅）', 'baseUrl': 'https://chatgpt.com', 'quotaType': 'codex_usage'},
+            {'id': 'antigravity', 'label': 'Antigravity（Google AI 订阅）', 'baseUrl': 'https://antigravity.google', 'quotaType': 'antigravity_quota'},
+            {'id': 'kimi', 'label': 'Kimi（Moonshot）', 'baseUrl': 'https://api.kimi.com', 'quotaType': 'kimi_coding_plan'},
+            {'id': 'zhipu', 'label': '智谱 BigModel（国内）', 'baseUrl': 'https://open.bigmodel.cn', 'quotaType': 'zhipu_quota'},
+            {'id': 'neurospark', 'label': 'NeuroSpark（Claude/GLM中转）', 'baseUrl': 'https://api.neuro-spark.ai', 'quotaType': 'neurospark_usage'},
+            {'id': 'google_billing', 'label': 'Google Gemini（付费 API）', 'baseUrl': 'https://console.cloud.google.com/billing', 'quotaType': 'gcp_billing'},
+            {'id': 'tencent_billing', 'label': '腾讯云（聚萤科技）', 'baseUrl': 'https://console.cloud.tencent.com/expense', 'quotaType': 'tencent_billing'},
+            {'id': 'runpod', 'label': 'RunPod GPU云（数字人口播）', 'baseUrl': 'https://api.runpod.io', 'quotaType': 'runpod_gpu'},
+            {'id': 'tikhub', 'label': 'TikHub（社媒数据采集）', 'baseUrl': 'https://api.tikhub.io', 'quotaType': 'tikhub_balance'},
+            {'id': 'deepseek', 'label': 'DeepSeek', 'baseUrl': 'https://api.deepseek.com', 'quotaType': 'deepseek_balance'},
+        ]
+        future_ms = int(time.time() * 1000) + 100_000_000
+        quotas = {
+            'codex': {'plan': 'prolite', 'allowed': True, 'primaryWindow': {'usedPercent': 19, 'limitWindowSeconds': 604800, 'resetAt': int(time.time()) + 300000}, 'secondaryWindow': None},
+            'antigravity': {
+                'available': True, 'updatedAt': int(time.time() * 1000), 'ageSec': 5,
+                'buckets': [
+                    {'id': 'gemini-5h', 'label': 'Gemini 5小时窗口', 'unit': 3, 'usedPercent': 18.4, 'resetAtMs': future_ms, 'disabled': False},
+                    {'id': '3p-weekly', 'label': 'Claude/GPT 周额度', 'unit': 6, 'usedPercent': 5.0, 'resetAtMs': future_ms, 'disabled': False},
+                ],
+                'credits': [],
+            },
+            'kimi': {'usage': {'limit': '100', 'used': '10', 'resetTime': '2026-12-03T00:00:00Z'}, 'limits': []},
+            'zhipu': {'code': 200, 'data': {'level': 'max', 'limits': [{'type': 'TOKENS_LIMIT', 'unit': 6, 'percentage': 10, 'nextResetTime': future_ms}]}},
+            'neurospark': {'totalSpend': 1.32, 'todaySpend': 0.0, 'totalCalls': 64, 'todayCalls': 0},
+            'google_billing': {'available': False, 'reason': 'waiting_first_export', 'dataset': 'billing_export', 'hint': '已连通 · 首份账单生成中（2~24h）'},
+            'tencent_billing': {
+                'available': True,
+                'month': '2026-11',
+                'balanceAvailable': True,
+                'balanceCny': 35.3,
+                'freezeCny': 0.0,
+                'oweCny': 0.0,
+                'monthRealBill': 0.0,
+                'monthCost': 12.98,
+                'products': [{'name': '轻量应用服务器<img src=x onerror="window.__xss_tc=1">', 'cost': 7.05}],
+            },
+            'runpod': {'balance': 8.20, 'runningCount': 0, 'podCount': 0, 'pods': []},
+            'tikhub': {'balance': 4.88, 'freeCredit': 0, 'active': True},
+            'deepseek': {'is_available': False, 'balance_infos': [{'currency': 'CNY', 'total_balance': '0.00'}]},
+        }
+        errors = []
+        async with quota_page(providers, quotas) as page:
+            page.on('pageerror', lambda err: errors.append(str(err)))
+            await page.locator('#pageTabs button[data-page="quota"]').click()
+            await page.wait_for_function("document.querySelectorAll('#providerGrid .card').length === 10")
+            self.assertEqual(await page.locator('#pageBadgeQuota').inner_text(), '10')
+            tc_text = await page.locator('[data-provider-card="tencent_billing"]').inner_text()
+            self.assertIn('账户余额（CNY）', tc_text)
+            self.assertIn('¥35.30', tc_text)
+            self.assertIn('本月成本 ¥12.98', tc_text)
+            self.assertIn('余额实时', tc_text)
+            self.assertIsNone(await page.evaluate('window.__xss_tc'))
+
+            # Row 3: google_billing + tencent_billing as 2 half-width cards
+            half_cards = page.locator('#providerGrid .card.card-half')
+            self.assertEqual(await half_cards.count(), 2)
+            hb0 = await half_cards.nth(0).bounding_box()
+            hb1 = await half_cards.nth(1).bounding_box()
+            self.assertAlmostEqual(hb0['y'], hb1['y'], delta=2.0)
+            self.assertLess(hb0['x'], hb1['x'])
+
+            # Row 4: runpod, tikhub, deepseek share bottom row
+            all_cards = page.locator('#providerGrid .card')
+            b_boxes = [await all_cards.nth(idx).bounding_box() for idx in (7, 8, 9)]
+            self.assertAlmostEqual(b_boxes[0]['y'], b_boxes[1]['y'], delta=2.0)
+            self.assertAlmostEqual(b_boxes[1]['y'], b_boxes[2]['y'], delta=2.0)
+
+            # Fallback state without balance permission shows read-only bill summary cleanly
+            quotas['tencent_billing']['balanceAvailable'] = False
+            quotas['tencent_billing']['balanceCny'] = None
+            await page.evaluate('fetchProviderQuotas()')
+            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('纯只读账单')")
+            fb_text = await page.locator('[data-provider-card="tencent_billing"]').inner_text()
+            self.assertIn('本月成本（CNY）', fb_text)
+            self.assertIn('¥12.98', fb_text)
             self.assertEqual(errors, [])
 
 

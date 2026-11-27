@@ -230,6 +230,7 @@ class ProjectsPageTests(unittest.IsolatedAsyncioTestCase):
             # Default tab is 运营监控; obsolete #summaryGrid removed; ZHITAI card rendered
             self.assertEqual(await page.locator('#summaryGrid').count(), 0)
             self.assertTrue(await page.locator('#page-monitor').is_visible())
+            self.assertFalse(await page.locator('#page-quota').is_visible())
             self.assertFalse(await page.locator('#page-projects').is_visible())
             self.assertFalse(await page.locator('#page-ops').is_visible())
             self.assertEqual(await page.locator('#hZhitai').inner_text(), '32%')
@@ -248,9 +249,14 @@ class ProjectsPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('未读邮件', email_card_text)
             self.assertNotIn('获取失败', email_card_text)
 
+            # Switch to 额度与费用 tab and verify visibility
+            await page.locator('#pageTabs button[data-page="quota"]').click()
+            self.assertFalse(await page.locator('#page-monitor').is_visible())
+            self.assertTrue(await page.locator('#page-quota').is_visible())
+
             # Switch to 活跃项目 tab: all 7 cards render immediately
             await page.locator('#pageTabs button[data-page="projects"]').click()
-            self.assertFalse(await page.locator('#page-monitor').is_visible())
+            self.assertFalse(await page.locator('#page-quota').is_visible())
             self.assertTrue(await page.locator('#page-projects').is_visible())
             await page.wait_for_function("document.querySelectorAll('#projectGrid .project-card').length === 7")
 
