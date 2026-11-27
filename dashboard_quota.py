@@ -1,21 +1,27 @@
 """Provider quota discovery, caching, and upstream/local snapshot adapters."""
+import base64
 import datetime
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 QUOTA_CACHE_TTL = 60
+GCP_BILLING_CACHE_TTL = 600
+GCP_BILLING_DEFAULT_DATASET = 'billing_export'
 ANTIGRAVITY_REFRESH_COOLDOWN = 15
 ANTIGRAVITY_REFRESH_TIMEOUT = 15
 ANTIGRAVITY_REFRESH_MAX_ATTEMPTS = 3
 ANTIGRAVITY_REFRESH_SETTLE_WAIT = 0.5
+_SAFE_BQ_IDENT_RE = re.compile(r'^[A-Za-z0-9_]+$')
+_SAFE_GCP_PROJECT_RE = re.compile(r'^[a-z][a-z0-9-]{4,61}[a-z0-9]$')
 
 _PROXY_HANDLER = urllib.request.ProxyHandler({
     'http': 'http://127.0.0.1:7890',
@@ -46,6 +52,8 @@ _quota_cache = {}
 _quota_cache_lock = threading.Lock()
 _ag_refresh_lock = threading.Lock()
 _ag_last_refresh_ts = 0.0
+_gcp_token_cache = {}
+_gcp_token_lock = threading.Lock()
 
 
 def is_finite_number(value):
@@ -96,6 +104,7 @@ class QuotaCache:
 
 
 _DEFAULT_CACHE = QuotaCache()
+_GCP_BILLING_CACHE = QuotaCache(ttl_seconds=GCP_BILLING_CACHE_TTL)
 
 
 def load_project_config(project_dir):
@@ -166,6 +175,21 @@ def get_providers(
             })
 
         proj_cfg = load_project_config(project_dir)
+
+        gcp_cfg = proj_cfg.get('gcp_billing') if isinstance(proj_cfg.get('gcp_billing'), dict) else {}
+        gcp_sa_path = gcp_cfg.get('sa_path') or os.path.join(project_dir, 'data', 'gcp_billing_sa.json')
+        gcp_dataset = gcp_cfg.get('dataset') or GCP_BILLING_DEFAULT_DATASET
+        if isinstance(gcp_sa_path, str) and gcp_sa_path and os.path.isfile(gcp_sa_path):
+            result.append({
+                'id': 'google_billing',
+                'label': 'Google Gemini（付费 API）',
+                'baseUrl': 'https://console.cloud.google.com/billing',
+                'apiKey': 'service-account',
+                'quotaApi': 'bigquery',
+                'quotaType': 'gcp_billing',
+                'saPath': gcp_sa_path,
+                'dataset': str(gcp_dataset),
+            })
 
         rp_key = proj_cfg.get('runpod_key', '')
         if isinstance(rp_key, str) and len(rp_key) >= 10:
@@ -701,12 +725,198 @@ def fetch_codex(provider_id, codex_auth_path=None, cache=_DEFAULT_CACHE):
     return cache.get_or_fetch(provider_id, _fetch, timeout_label='Codex API')
 
 
+def _b64u_encode(raw_bytes):
+    return base64.urlsafe_b64encode(raw_bytes).rstrip(b'=').decode('ascii')
+
+
+def _mint_gcp_access_token(sa_info, opener=_PROXY_OPENER, now_fn=time.time):
+    """Mint and cache a read-only OAuth2 access token from a GCP service account JSON."""
+    client_email = sa_info.get('client_email') or ''
+    private_key = sa_info.get('private_key') or ''
+    token_uri = sa_info.get('token_uri') or 'https://oauth2.googleapis.com/token'
+    cache_key = f'{client_email}|{token_uri}'
+    now = int(now_fn())
+    with _gcp_token_lock:
+        cached = _gcp_token_cache.get(cache_key)
+        if cached and cached[1] - now > 300:
+            return cached[0]
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    header_b64 = _b64u_encode(json.dumps({'alg': 'RS256', 'typ': 'JWT'}).encode('utf-8'))
+    claim_b64 = _b64u_encode(json.dumps({
+        'iss': client_email,
+        'scope': 'https://www.googleapis.com/auth/bigquery.readonly',
+        'aud': token_uri,
+        'iat': now,
+        'exp': now + 3600,
+    }).encode('utf-8'))
+    signing_input = f'{header_b64}.{claim_b64}'.encode('ascii')
+    key_obj = serialization.load_pem_private_key(private_key.encode('utf-8'), password=None)
+    signature = key_obj.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+    assertion = f'{header_b64}.{claim_b64}.{_b64u_encode(signature)}'
+
+    req = urllib.request.Request(
+        token_uri,
+        data=urlencode({
+            'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            'assertion': assertion,
+        }).encode('utf-8'),
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        method='POST',
+    )
+    with opener.open(req, timeout=15) as resp:
+        tok = json.loads(resp.read())
+    access_token = tok.get('access_token')
+    if not access_token:
+        raise RuntimeError('GCP OAuth token响应缺少 access_token')
+    expires_in = int(tok.get('expires_in') or 3600)
+    with _gcp_token_lock:
+        _gcp_token_cache[cache_key] = (access_token, now + expires_in)
+    return access_token
+
+
+def _bq_request(url, access_token, body=None, opener=_PROXY_OPENER, timeout=15):
+    """Send an authenticated read-only JSON request to the BigQuery REST API."""
+    headers = {'Authorization': 'Bearer ' + access_token}
+    data = None
+    method = 'GET'
+    if body is not None:
+        headers['Content-Type'] = 'application/json'
+        data = json.dumps(body).encode('utf-8')
+        method = 'POST'
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with opener.open(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def fetch_gcp_billing(
+    sa_path,
+    provider_id='google_billing',
+    dataset=GCP_BILLING_DEFAULT_DATASET,
+    cache=_GCP_BILLING_CACHE,
+    opener=_PROXY_OPENER,
+    now_fn=time.time,
+):
+    """Query current-month spend and promotional credit usage from BigQuery Billing Export."""
+    if not _SAFE_BQ_IDENT_RE.match(str(dataset or '')):
+        return 502, {'error': f'非法 BigQuery 数据集名: {dataset!r}', 'cached': False}
+    if not sa_path or not os.path.isfile(sa_path):
+        return 502, {'error': '未找到 GCP 只读服务账号密钥文件', 'cached': False}
+
+    def _fetch():
+        with open(sa_path, encoding='utf-8') as f:
+            sa_info = json.load(f)
+        proj = str(sa_info.get('project_id') or '').strip()
+        if not _SAFE_GCP_PROJECT_RE.match(proj) or not sa_info.get('client_email') or not sa_info.get('private_key'):
+            raise ValueError('GCP 服务账号 JSON 字段不完整或 project_id 非法')
+
+        token = _mint_gcp_access_token(sa_info, opener=opener, now_fn=now_fn)
+        ds_url = f'https://bigquery.googleapis.com/bigquery/v2/projects/{quote(proj)}/datasets/{quote(dataset)}'
+        ds_meta = _bq_request(ds_url, token, opener=opener)
+        location = str(ds_meta.get('location') or 'US')
+
+        tb_url = f'{ds_url}/tables?maxResults=50'
+        tb_resp = _bq_request(tb_url, token, opener=opener)
+        export_tables = sorted(
+            [
+                str((t.get('tableReference') or {}).get('tableId') or '')
+                for t in (tb_resp.get('tables') or [])
+                if re.match(r'^gcp_billing_export_v1_[A-Za-z0-9_]+$', str((t.get('tableReference') or {}).get('tableId') or ''))
+            ],
+            reverse=True,
+        )
+        if not export_tables:
+            return {
+                'available': False,
+                'reason': 'waiting_first_export',
+                'projectId': proj,
+                'dataset': dataset,
+                'location': location,
+                'hint': '已连通 · 首份账单生成中（2~24h）',
+            }
+
+        table_id = export_tables[0]
+        sql = (
+            "SELECT "
+            "ANY_VALUE(currency) AS currency, "
+            "ROUND(SUM(cost), 4) AS gross_cost, "
+            "ROUND(SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)), 4) AS credits_amount, "
+            "ROUND(SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)), 4) AS net_cost, "
+            "ROUND(SUM(IF(DATE(usage_start_time, 'Asia/Shanghai') = CURRENT_DATE('Asia/Shanghai'), cost, 0)), 4) AS today_gross, "
+            "COUNT(*) AS row_count, "
+            "MAX(CAST(export_time AS STRING)) AS last_export_time "
+            f"FROM `{proj}.{dataset}.{table_id}` "
+            "WHERE invoice.month = FORMAT_DATE('%Y%m', CURRENT_DATE('Asia/Shanghai'))"
+        )
+        q_url = f'https://bigquery.googleapis.com/bigquery/v2/projects/{quote(proj)}/queries'
+        q_resp = _bq_request(
+            q_url,
+            token,
+            body={'query': sql, 'useLegacySql': False, 'location': location},
+            opener=opener,
+        )
+        if q_resp.get('jobComplete') is False:
+            raise RuntimeError('BigQuery 查询超时未完成')
+
+        rows = q_resp.get('rows') or []
+        vals = (rows[0].get('f') or []) if rows and isinstance(rows[0], dict) else []
+
+        def _cell(idx):
+            if idx < len(vals) and isinstance(vals[idx], dict):
+                return vals[idx].get('v')
+            return None
+
+        def _float_cell(idx):
+            raw_v = _cell(idx)
+            try:
+                val = float(raw_v) if raw_v is not None else 0.0
+                return val if math.isfinite(val) else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        currency = str(_cell(0) or 'USD').upper()
+        gross_cost = round(_float_cell(1), 4)
+        credits_raw = _float_cell(2)
+        net_cost = round(_float_cell(3), 4)
+        today_gross = round(_float_cell(4), 4)
+        try:
+            row_count = int(_cell(5) or 0)
+        except (TypeError, ValueError):
+            row_count = 0
+        last_export_time = _cell(6)
+
+        return {
+            'available': True,
+            'projectId': proj,
+            'dataset': dataset,
+            'tableId': table_id,
+            'location': location,
+            'currency': currency,
+            'monthGross': gross_cost,
+            'monthCredits': round(max(0.0, -credits_raw), 4),
+            'monthNet': net_cost,
+            'todayGross': today_gross,
+            'rowCount': row_count,
+            'lastExportTime': str(last_export_time) if last_export_time else None,
+        }
+
+    return cache.get_or_fetch(provider_id, _fetch, timeout_label='Google BigQuery API')
+
+
 def fetch_quota(provider, antigravity_snapshot_path, codex_auth_path=None, cache=_DEFAULT_CACHE):
     """Dispatch quota query by provider quotaType."""
     qtype = provider.get('quotaType')
     pid = provider.get('id')
     if qtype == 'antigravity_quota':
         return fetch_antigravity(antigravity_snapshot_path)
+    if qtype == 'gcp_billing':
+        return fetch_gcp_billing(
+            provider['saPath'],
+            provider_id=pid,
+            dataset=provider.get('dataset') or GCP_BILLING_DEFAULT_DATASET,
+        )
     if qtype == 'runpod_gpu':
         return fetch_runpod(provider['apiKey'], pid, cache=cache)
     if qtype == 'tikhub_balance':

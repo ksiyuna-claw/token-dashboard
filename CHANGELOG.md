@@ -2,6 +2,13 @@
 
 ## 2026-11-27
 
+- **接入 Google Gemini（付费 API）BigQuery 账单卡片 + 供应商 12 列网格齐整排版（水母 🪼，经董事长授权执行）**：
+  1. **只读秘钥落盘与隔离**：将 GCP 控制台生成的最小权限只读服务账号秘钥规范重命名为 `data/gcp_billing_sa.json`（`chmod 600`），核验 `.gitignore`（`data/`）屏蔽不入库。
+  2. **零新增依赖 BigQuery 适配器（`dashboard_quota.py`）**：复用本机既有 `cryptography` + 标准库直签 RS256 JWT 获取 `bigquery.readonly` 短时 token（经本地代理访问），新增 `fetch_gcp_billing()`（600s 缓存 + 旧缓存兜底）与 `get_providers()` 自动发现（支持 `config.json` 可选 `gcp_billing.sa_path`/`dataset` 覆盖）。无账单表时返回 `waiting_first_export`（HTTP 200）；出账后自动聚合本月原价消耗、赠金抵扣（`monthCredits`）、净扣费及今日消耗。
+  3. **12 列网格与 4 列底行排版（`templates/token_dashboard.html`）**：`#providerGrid` 升级为 12 列网格，第 1 行 `Codex(4) + Antigravity(8)`、第 2 行 `Kimi(4) + 智谱(4) + NeuroSpark(4)`、第 3 行 `Google Gemini(3) + RunPod(3) + TikHub(3) + DeepSeek(3)`（`.card-quarter`，宽 `254.5px`、等高 `165px`），9 张卡严丝合缝满排无孤卡；窄屏 `<= 900px` 自动退回单列。
+  4. **验证**：`py_compile` + `node --check` 通过；`unittest` **54/54** 全量通过（`6.019s`，含新建 [test_gcp_billing.py](tests/test_gcp_billing.py) 3 项及 [test_quota_page.py](tests/test_quota_page.py) 9 卡 4 列底行 + 出账前后两态 + XSS 测试）；重载服务（PID `85743`）后 `curl /providers`（9 家、HTTP 200）与 `/quota/google_billing`（HTTP 200、`waiting_first_export`）通过；内置浏览器 `1280×900` 实测 9 卡几何位置对齐、无折行截断、0 报错（21 请求全 200）。
+  5. **回滚**：移除 `data/gcp_billing_sa.json` 或 `git revert <commit>` 后 `launchctl kickstart -k "gui/$(id -u)/com.openclaw.token-dashboard"`。
+
 - **📦 模型供应商额度布局优化：Antigravity 升级「跨 2 列双栏宽卡」（水母 🪼，经董事长拍板执行）**：
   1. **背景与依据**：参照 [11-23 额度板块布局规范](变更说明_20261123_额度板块布局调整.md)（Codex 首、DeepSeek 尾、不硬挤压缩），`Claude/GPT 周额度` 启用后 Antigravity 卡片出现 4 条完整进度条，单列竖排拉高整行且第 3 行右下角留空 1 格。
   2. **跨 2 列双栏改造**：`templates/token_dashboard.html` 新增 `.card-wide`（`grid-column: span 2`）与 `.ag-cols` 双栏网格（窄屏 `<= 900px` 自动退回单列堆叠）；抽出 `renderQuotaRows()` 复用行渲染逻辑，改造 `renderAntigravityCard()` 固定左列显示 `Gemini`（5h + 周）、右列显示 `Claude/GPT`（5h + 周，不再因 0% 折叠造成高度抖动），8 张卡在桌面端排成齐整的 **3×3 满格**（第 1 行 `Codex + Antigravity 宽卡` 高 `257.5px`、第 2 行 `Kimi + 智谱 + NeuroSpark` 高 `252px`、第 3 行 `RunPod + TikHub + DeepSeek` 高 `165px`）。

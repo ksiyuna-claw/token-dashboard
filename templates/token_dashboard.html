@@ -13,15 +13,17 @@
   .header .meta { font-size: 13px; color: var(--dim); }
   .section { margin-bottom: 28px; }
   .section-title { font-size: 14px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
-  .provider-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-  .card-wide { grid-column: span 2; }
+  .provider-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+  .provider-grid > .card { grid-column: span 4; min-width: 0; }
+  .provider-grid > .card.card-wide { grid-column: span 8; }
+  .provider-grid > .card.card-quarter { grid-column: span 3; }
   .ag-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
   .ag-col { min-width: 0; }
   .ag-col + .ag-col { border-left: 1px solid rgba(48,54,61,0.55); padding-left: 20px; }
   .ag-footer-credits { margin-top: 4px; border-top: 1px solid rgba(48,54,61,0.5); }
   @media (max-width: 900px) {
     .provider-grid { grid-template-columns: 1fr; }
-    .card-wide { grid-column: auto; }
+    .provider-grid > .card, .provider-grid > .card.card-wide, .provider-grid > .card.card-quarter { grid-column: auto; }
     .ag-cols { grid-template-columns: 1fr; }
     .ag-col + .ag-col { border-left: none; padding-left: 0; border-top: 1px solid rgba(48,54,61,0.5); }
   }
@@ -708,12 +710,16 @@ async function fetchProviderQuotas() {
       })
     );
     let quotaAnyFailed = false;
+    const bottomTierIds = new Set(['google_billing', 'runpod', 'tikhub', 'deepseek']);
+    const useQuarterRow = providers.filter(x => bottomTierIds.has(x.id)).length === 4;
     for (let i = 0; i < results.length; i++) {
       const res = results[i];
       const p = providers[i];
+      const qCls = (useQuarterRow && bottomTierIds.has(p.id)) ? 'card-quarter' : '';
+      const clsAttr = qCls ? (' ' + qCls) : '';
       if (res.status !== 'fulfilled') {
         quotaAnyFailed = true;
-        cards.push(renderNoQuota(p.label, p.baseUrl.split('//')[1]?.split('/')[0] || '', '请求失败(' + ((res.reason && res.reason.message) || '网络抖动') + ')'));
+        cards.push(renderNoQuota(p.label, p.baseUrl.split('//')[1]?.split('/')[0] || '', '请求失败(' + ((res.reason && res.reason.message) || '网络抖动') + ')', { extraClass: qCls }));
         continue;
       }
       const j = res.value.data;
@@ -733,16 +739,16 @@ async function fetchProviderQuotas() {
           if (info) {
             const total = parseFloat(info.total_balance || 0).toFixed(2);
             const availTag = j.is_available ? '<span class="tag tag-green">可用</span>' : '<span class="tag tag-red">不可用</span>';
-            cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费</div>' +
+            cards.push('<div class="card' + clsAttr + '"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费</div>' +
               '<div class="quota-row"><div><div class="label">余额（' + mEsc(info.currency || 'CNY') + '）</div></div><div class="value" style="color:var(--green)">¥' + mEsc(total) + '</div></div>' +
               '<div class="quota-row" style="border:none"><div></div>' + availTag + '</div></div>');
           } else {
-            cards.push(renderNoQuota(p.label, host, '无余额信息'));
+            cards.push(renderNoQuota(p.label, host, '无余额信息', { extraClass: qCls }));
           }
         } else if (j.error) {
-          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error, { extraClass: qCls }));
         } else {
-          cards.push(renderNoQuota(p.label, host, '返回格式异常'));
+          cards.push(renderNoQuota(p.label, host, '返回格式异常', { extraClass: qCls }));
         }
       } else if (p.quotaType === 'kimi_balance') {
         if (j.code === 0 && j.data) {
@@ -797,6 +803,41 @@ async function fetchProviderQuotas() {
         } else {
           cards.push(renderNoQuota(p.label, host, 'API返回异常'));
         }
+      } else if (p.quotaType === 'gcp_billing') {
+        const dsLabel = 'BigQuery 账单 · ' + (j.dataset || 'billing_export');
+        if (j.error) {
+          cards.push(renderNoQuota(p.label, dsLabel, '获取失败: ' + j.error, { extraClass: qCls }));
+        } else if (j.available === false) {
+          cards.push('<div class="card' + clsAttr + '" data-provider-card="google_billing">' +
+            '<div class="provider-name">' + mEsc(p.label) + '</div>' +
+            '<div class="provider-sub">' + mEsc(dsLabel) + '</div>' +
+            '<div class="quota-row"><div><div class="label">状态</div></div><div><span class="tag tag-blue">待首次出账</span></div></div>' +
+            '<div class="quota-row" style="border:none;padding:2px 0"><div style="font-size:11px;color:var(--dim)">' + mEsc(j.hint || '已连通 · 首份账单生成中（2~24h）') + '</div></div></div>');
+        } else if (j.available === true) {
+          const cur = String(j.currency || 'USD').toUpperCase();
+          const sym = (cur === 'JPY' || cur === 'CNY') ? '¥' : '$';
+          const gross = Number(j.monthGross);
+          const credits = Number(j.monthCredits);
+          const net = Number(j.monthNet);
+          const today = Number(j.todayGross);
+          if (!isFinite(gross) || !isFinite(net)) {
+            cards.push(renderNoQuota(p.label, dsLabel, '账单数值异常', { extraClass: qCls }));
+          } else {
+            const todayPart = (isFinite(today) && today > 0) ? (' · 今日 ' + sym + today.toFixed(2)) : '';
+            const subDetail = '赠金抵扣 ' + sym + (isFinite(credits) ? credits.toFixed(2) : '0.00') + ' · 净扣 ' + sym + net.toFixed(2) + todayPart;
+            const tagHtml = net > 0
+              ? '<span class="tag tag-yellow">已扣预付</span>'
+              : '<span class="tag tag-green">赠金覆盖</span>';
+            cards.push('<div class="card' + clsAttr + '" data-provider-card="google_billing">' +
+              '<div class="provider-name">' + mEsc(p.label) + '</div>' +
+              '<div class="provider-sub">' + mEsc(dsLabel) + '</div>' +
+              '<div class="quota-row"><div><div class="label">本月消耗（' + mEsc(cur) + '）</div></div><div class="value" style="color:var(--green)">' + sym + gross.toFixed(2) + '</div></div>' +
+              '<div class="quota-row" style="padding:2px 0"><div style="font-size:10px;color:var(--dim)">' + mEsc(subDetail) + '</div></div>' +
+              '<div class="quota-row" style="border:none"><div></div>' + tagHtml + '</div></div>');
+          }
+        } else {
+          cards.push(renderNoQuota(p.label, dsLabel, 'API返回异常', { extraClass: qCls }));
+        }
       } else if (p.quotaType === 'runpod_gpu') {
         if (j.balance !== undefined) {
           const bal = parseFloat(j.balance).toFixed(2);
@@ -815,35 +856,35 @@ async function fetchProviderQuotas() {
           const podTag = runningN > 0 ? '<span class="tag tag-green">GPU 运行中 ×' + runningN + '</span>'
             : (totalN > 0 ? '<span class="tag" style="background:rgba(210,153,34,0.18);color:#d29922">GPU 已停 ×' + totalN + '</span>'
             : '<span class="tag tag-green">GPU 未开机</span>');
-          cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费（云GPU）</div>' +
+          cards.push('<div class="card' + clsAttr + '"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费（云GPU）</div>' +
             '<div class="quota-row"><div><div class="label">余额（USD）</div></div><div class="value" style="color:var(--green)">$' + bal + '</div></div>' +
             podHtml +
             '<div class="quota-row" style="border:none"><div></div>' + podTag + '</div></div>');
         } else if (j.error) {
-          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error, { extraClass: qCls }));
         } else {
-          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+          cards.push(renderNoQuota(p.label, host, 'API返回异常', { extraClass: qCls }));
         }
       } else if (p.quotaType === 'tikhub_balance') {
         if (j.balance !== undefined) {
           const bal = parseFloat(j.balance);
           const fc = parseFloat(j.freeCredit || 0);
           if (!isFinite(bal)) {  // 非法值fail-closed，不伪装0
-            cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+            cards.push(renderNoQuota(p.label, host, 'API返回异常', { extraClass: qCls }));
           } else {
             const acctTag = j.active === false ? '<span class="tag tag-red">账号异常</span>' : '<span class="tag tag-green">账号正常</span>';
             let rows = '<div class="quota-row"><div><div class="label">余额（USD）</div></div><div class="value" style="color:var(--green)">$' + bal.toFixed(2) + '</div></div>';
             if (isFinite(fc) && fc > 0) {
               rows += '<div class="quota-row"><div><div class="label">免费额度（USD）</div></div><div class="value">$' + fc.toFixed(2) + '</div></div>';
             }
-            cards.push('<div class="card"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费（社媒API）</div>' +
+            cards.push('<div class="card' + clsAttr + '"><div class="provider-name">' + mEsc(p.label) + '</div><div class="provider-sub">' + mEsc(host) + ' · 按量付费（社媒API）</div>' +
               rows +
               '<div class="quota-row" style="border:none"><div></div>' + acctTag + '</div></div>');
           }
         } else if (j.error) {
-          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error));
+          cards.push(renderNoQuota(p.label, host, '获取失败: ' + j.error, { extraClass: qCls }));
         } else {
-          cards.push(renderNoQuota(p.label, host, 'API返回异常'));
+          cards.push(renderNoQuota(p.label, host, 'API返回异常', { extraClass: qCls }));
         }
       } else if (p.quotaType === 'neurospark_usage') {
         if (j.totalSpend !== undefined) {

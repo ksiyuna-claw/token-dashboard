@@ -242,6 +242,81 @@ class QuotaPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await page.evaluate('window.__xss'))
             self.assertEqual(errors, [])
 
+    async def test_gcp_billing_card_states_and_four_column_bottom_row(self):
+        providers = [
+            {'id': 'codex', 'label': 'Codex（ChatGPT订阅）', 'baseUrl': 'https://chatgpt.com', 'quotaType': 'codex_usage'},
+            {'id': 'antigravity', 'label': 'Antigravity（Google AI 订阅）', 'baseUrl': 'https://antigravity.google', 'quotaType': 'antigravity_quota'},
+            {'id': 'kimi', 'label': 'Kimi（Moonshot）', 'baseUrl': 'https://api.kimi.com', 'quotaType': 'kimi_coding_plan'},
+            {'id': 'zhipu', 'label': '智谱 BigModel（国内）', 'baseUrl': 'https://open.bigmodel.cn', 'quotaType': 'zhipu_quota'},
+            {'id': 'neurospark', 'label': 'NeuroSpark（Claude/GLM中转）', 'baseUrl': 'https://api.neuro-spark.ai', 'quotaType': 'neurospark_usage'},
+            {'id': 'google_billing', 'label': 'Google Gemini（付费 API）', 'baseUrl': 'https://console.cloud.google.com/billing', 'quotaType': 'gcp_billing'},
+            {'id': 'runpod', 'label': 'RunPod GPU云（数字人口播）', 'baseUrl': 'https://api.runpod.io', 'quotaType': 'runpod_gpu'},
+            {'id': 'tikhub', 'label': 'TikHub（社媒数据采集）', 'baseUrl': 'https://api.tikhub.io', 'quotaType': 'tikhub_balance'},
+            {'id': 'deepseek', 'label': 'DeepSeek', 'baseUrl': 'https://api.deepseek.com', 'quotaType': 'deepseek_balance'},
+        ]
+        future_ms = int(time.time() * 1000) + 100_000_000
+        quotas = {
+            'codex': {'plan': 'prolite', 'allowed': True, 'primaryWindow': {'usedPercent': 19, 'limitWindowSeconds': 604800, 'resetAt': int(time.time()) + 300000}, 'secondaryWindow': None},
+            'antigravity': {
+                'available': True, 'updatedAt': int(time.time() * 1000), 'ageSec': 5,
+                'buckets': [
+                    {'id': 'gemini-5h', 'label': 'Gemini 5小时窗口', 'unit': 3, 'usedPercent': 18.4, 'resetAtMs': future_ms, 'disabled': False},
+                    {'id': '3p-weekly', 'label': 'Claude/GPT 周额度', 'unit': 6, 'usedPercent': 95.6, 'resetAtMs': future_ms, 'disabled': False},
+                ],
+                'credits': [],
+            },
+            'kimi': {'usage': {'limit': '100', 'used': '45', 'resetTime': '2026-12-03T00:00:00Z'}, 'limits': []},
+            'zhipu': {'code': 200, 'data': {'level': 'max', 'limits': [{'type': 'TOKENS_LIMIT', 'unit': 6, 'percentage': 43, 'nextResetTime': future_ms}]}},
+            'neurospark': {'totalSpend': 1.32, 'todaySpend': 0.0, 'totalCalls': 64, 'todayCalls': 0},
+            'google_billing': {
+                'available': False,
+                'reason': 'waiting_first_export',
+                'dataset': 'billing_export<img src=x onerror="window.__xss_gb=1">',
+                'hint': '已连通 · 首份账单生成中（2~24h）',
+            },
+            'runpod': {'balance': 8.20, 'runningCount': 0, 'podCount': 0, 'pods': []},
+            'tikhub': {'balance': 4.88, 'freeCredit': 0, 'active': True},
+            'deepseek': {'is_available': False, 'balance_infos': [{'currency': 'CNY', 'total_balance': '0.00'}]},
+        }
+        errors = []
+        async with quota_page(providers, quotas) as page:
+            page.on('pageerror', lambda err: errors.append(str(err)))
+            await page.wait_for_function("document.querySelectorAll('#providerGrid .card').length === 9")
+            grid_text = await page.locator('#providerGrid').inner_text()
+            self.assertIn('Google Gemini（付费 API）', grid_text)
+            self.assertIn('待首次出账', grid_text)
+            self.assertIn('首份账单生成中', grid_text)
+            self.assertIsNone(await page.evaluate('window.__xss_gb'))
+
+            # Verify bottom 4 cards share the exact same row (y coordinate) and width
+            quarter_cards = page.locator('#providerGrid .card.card-quarter')
+            self.assertEqual(await quarter_cards.count(), 4)
+            boxes = [await quarter_cards.nth(i).bounding_box() for i in range(4)]
+            self.assertTrue(all(boxes))
+            for i in range(3):
+                self.assertAlmostEqual(boxes[i]['y'], boxes[i + 1]['y'], delta=2.0)
+                self.assertLess(boxes[i]['x'], boxes[i + 1]['x'])
+
+            # Switch to populated BigQuery billing data and verify spend + credits
+            quotas['google_billing'] = {
+                'available': True,
+                'dataset': 'billing_export',
+                'currency': 'JPY',
+                'monthGross': 320.5,
+                'monthCredits': 320.5,
+                'monthNet': 0.0,
+                'todayGross': 12.3,
+            }
+            await page.evaluate('fetchProviderQuotas()')
+            await page.wait_for_function("document.getElementById('providerGrid').innerText.includes('¥320.50')")
+            paid_text = await page.locator('[data-provider-card="google_billing"]').inner_text()
+            self.assertIn('本月消耗（JPY）', paid_text)
+            self.assertIn('¥320.50', paid_text)
+            self.assertIn('赠金抵扣 ¥320.50', paid_text)
+            self.assertIn('今日 ¥12.30', paid_text)
+            self.assertIn('赠金覆盖', paid_text)
+            self.assertEqual(errors, [])
+
 
 if __name__ == '__main__':
     unittest.main()
